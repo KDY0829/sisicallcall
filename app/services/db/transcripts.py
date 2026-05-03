@@ -4,7 +4,7 @@ DB transcript adapter.
 calls / transcripts 테이블에서 종료된 통화 context를 조회한다.
 
 ── DB 접근 방식 ───────────────────────────────────────────────────────────────
-asyncpg per-call connect (call_repo.py / _tenant_helpers.py 와 동일 방식).
+asyncpg per-call connect (call_repo.py / app/services/tenant.py 와 동일 방식).
 import 시점에 DB 연결을 만들지 않는다.
 함수 호출 시점에만 asyncpg.connect()를 호출한다.
 

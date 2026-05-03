@@ -22,6 +22,7 @@ load_dotenv()
 
 from app.agents.conversational.graph import build_graph
 from app.services.session.redis_session import RedisSessionService
+from app.services.tenant import get_tenant_meta
 
 
 async def main():
@@ -30,8 +31,9 @@ async def main():
 
     call_id = str(uuid.uuid4())
     tenant_id = "ba2bf499-6fcc-4340-b3dd-9341f8bcc915"  # 한밭식당 (검증용 임시값)
+    tenant_name, tenant_industry = await get_tenant_meta(tenant_id)
 
-    print(f"call_id={call_id} tenant_id={tenant_id}")
+    print(f"call_id={call_id} tenant_id={tenant_id} name={tenant_name} industry={tenant_industry}")
     print("종료: 'exit' 또는 Ctrl+C")
     print("세션 초기화: 'clear'\n")
 
@@ -60,6 +62,8 @@ async def main():
         state = {
             "call_id": call_id,
             "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "tenant_industry": tenant_industry,
             "user_text": user_text,
             "intent": "",
             "response_text": "",
