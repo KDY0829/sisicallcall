@@ -62,9 +62,14 @@ async def faq_branch_node(state: CallState) -> dict:
         print("[faq_branch] is_vision=True 청크 발견 (threshold 이내) → polite vision")
         return {"response_text": _POLITE_VISION}
 
-    # 4. 게이트 통과 → LLM 응답 (컨텍스트는 results 전체)
+    # threshold 통과 청크가 없으면 LLM 환각 차단 — 즉시 NO_RESULT.
+    if not related:
+        print("[faq_branch] threshold 통과 청크 없음 → polite no_result")
+        return {"response_text": _POLITE_NO_RESULT}
+
+    # 4. 게이트 통과 → LLM 응답 (컨텍스트는 threshold 통과 청크만)
     context = "\n\n".join(
-        f"[청크 {i+1}]\n{r.get('document', '')}" for i, r in enumerate(results)
+        f"[청크 {i+1}]\n{r.get('document', '')}" for i, r in enumerate(related)
     )
     user_message = f"[검색 결과]\n{context}\n\n[사용자 질문]\n{query}"
 
