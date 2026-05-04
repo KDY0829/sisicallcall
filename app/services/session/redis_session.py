@@ -64,3 +64,31 @@ class RedisSessionService:
     async def get_auth_id(self, call_id: str) -> str | None:
         view = await self.load(call_id)
         return view.get("auth_id")
+
+    async def set_pending_task(self, call_id: str, task: dict) -> None:
+        """task_branch 가 polite_auth 응답 직전 호출 — auth verified 후 자동 재실행용.
+
+        task 구조: {"tool": str, "action_type": str, "arguments": dict, "user_text": str}.
+        """
+        view = await self.load(call_id)
+        view["pending_task"] = task
+        await self._client.set(
+            self._key(call_id),
+            json.dumps(view, ensure_ascii=False),
+            ex=_TTL_SECONDS,
+        )
+
+    async def get_pending_task(self, call_id: str) -> dict | None:
+        view = await self.load(call_id)
+        return view.get("pending_task")
+
+    async def clear_pending_task(self, call_id: str) -> None:
+        view = await self.load(call_id)
+        if "pending_task" not in view:
+            return
+        del view["pending_task"]
+        await self._client.set(
+            self._key(call_id),
+            json.dumps(view, ensure_ascii=False),
+            ex=_TTL_SECONDS,
+        )

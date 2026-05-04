@@ -17,6 +17,7 @@ _HISTORY_TURN_LIMIT = 6
 
 _POLITE_NO_TOOLS = "이 매장은 자동 업무 처리가 지원되지 않아요. 매장으로 직접 문의해주세요."
 _POLITE_AUTH = "본인 인증이 필요한 작업이에요. 인증 진행해드릴까요?"
+_POLITE_BLOCKED = "본인 인증이 여러 번 실패해 더 이상 진행이 어려워요. 상담원으로 연결해드릴게요."
 _POLITE_MISSING_INFO = "처리에 필요한 정보를 조금 더 알려주시겠어요?"
 _POLITE_TOOL_FAILED = "처리 중 문제가 생겼어요. 잠시 후 다시 시도해주시거나 매장으로 문의해주세요."
 
@@ -63,13 +64,15 @@ def _format_user_message(rewritten: str, user_text: str, history: list) -> str:
     return "\n\n".join(sections)
 
 
-async def _ask_for_missing(
+async def ask_for_missing(
     query: str, action_type: str, spec: dict, missing: list[str]
 ) -> str:
     """누락된 required 인자에 대해 자연스러운 역질문 생성.
 
     TOOL_CATALOG 의 parameters.properties[k].description 을 LLM 에게 넘겨
     음성 친화적 한 문장 응답을 만든다. 실패 시 _POLITE_MISSING_INFO fallback.
+
+    auth_branch 자동 재실행 (D-C) 의 args 부족 분기에서도 재사용되므로 module-public.
     """
     properties = (spec.get("parameters") or {}).get("properties") or {}
     descs = [
@@ -98,7 +101,11 @@ async def _ask_for_missing(
         return _POLITE_MISSING_INFO
 
 
-async def _humanize(query: str, action_type: str, mcp_result: dict) -> str:
+async def humanize_tool_result(query: str, action_type: str, mcp_result: dict) -> str:
+    """MCP 도구 결과를 음성 친화적 한두 문장으로 변환.
+
+    auth_branch 자동 재실행 (D-C) 에서도 재사용되므로 module-public.
+    """
     user_message = (
         f"[사용자 요청]\n{query}\n\n"
         f"[처리한 작업]\n{action_type}\n\n"
@@ -166,9 +173,15 @@ async def task_branch_node(state: CallState) -> dict:
     spec = available[action_type]
     print(f"[task_branch] selected={action_type} args={arguments}")
 
-    # 3. requires_auth 게이트 (required 검증보다 먼저) — auth verified 면 우회.
-    #    인증 필요한 도구는 인자 묻기 전에 인증부터 — 사용자가 phone 같은 인자
-    #    응답하다가 auth 로 새는 흐름 차단.
+    # required 인자 사전 계산 — auth 게이트의 pending_task 저장 정책에 사용.
+    required = (spec.get("parameters") or {}).get("required") or []
+    missing = [k for k in required if not arguments.get(k)]
+
+    # 3. requires_auth 게이트 (required 검증보다 먼저) — verified=우회, blocked=상담원,
+    #    그 외(pending/세션없음)=pending_task 저장 + polite_auth. args 부족해도 항상 저장 —
+    #    auth_branch 가 verified 시점에 spec 재조회해서 missing 있으면 ask_for_missing 처리.
+    #    인증 필요한 도구는 인자 묻기 전에 인증부터 — phone 같은 인자 응답하다가
+    #    auth 로 새는 흐름 차단.
     if spec.get("requires_auth"):
         auth_id = await _call_session_svc.get_auth_id(call_id)
         auth_session = (
@@ -177,16 +190,23 @@ async def task_branch_node(state: CallState) -> dict:
         status = auth_session.get("status") if auth_session else None
         if status == "verified":
             print(f"[task_branch] requires_auth=True, auth verified → 게이트 우회")
+        elif status == "blocked":
+            print(f"[task_branch] requires_auth=True, auth blocked → polite_blocked")
+            return {"response_text": _POLITE_BLOCKED}
         else:
-            print(f"[task_branch] requires_auth=True, auth status={status} → polite_auth")
+            await _call_session_svc.set_pending_task(call_id, {
+                "tool": spec["tool"],
+                "action_type": action_type,
+                "arguments": arguments,
+                "user_text": user_text,
+            })
+            print(f"[task_branch] requires_auth=True, status={status}, missing={missing} → pending_task 저장 + polite_auth")
             return {"response_text": _POLITE_AUTH}
 
     # 4. required 인자 사후 검증 (LLM 환각/생략 안전망)
-    required = (spec.get("parameters") or {}).get("required") or []
-    missing = [k for k in required if not arguments.get(k)]
     if missing:
         print(f"[task_branch] required 부족 missing={missing}")
-        text = await _ask_for_missing(user_text, action_type, spec, missing)
+        text = await ask_for_missing(user_text, action_type, spec, missing)
         return {"response_text": text}
 
     # 5. mcp_client 호출 (sms 인 경우 수신자 자동 주입 — 시연용 안전망)
@@ -210,5 +230,5 @@ async def task_branch_node(state: CallState) -> dict:
         return {"response_text": _POLITE_TOOL_FAILED}
 
     # 6. 결과 humanize
-    text = await _humanize(user_text, action_type, mcp_result)
+    text = await humanize_tool_result(user_text, action_type, mcp_result)
     return {"response_text": text}
