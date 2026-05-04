@@ -52,6 +52,7 @@ import asyncpg
 
 from app.utils.config import settings
 from app.utils.logger import get_logger
+from app.utils.phone import normalize_korean_phone
 
 logger = get_logger(__name__)
 
@@ -158,15 +159,20 @@ async def get_completed_call_context_from_db(
             started_at = call_row["started_at"]
             ended_at = call_row["ended_at"]
 
+            metadata: dict = {
+                "call_id": call_id,
+                "tenant_id": str(call_row["tenant_id"]),
+                "start_time": started_at.isoformat() if started_at else None,
+                "end_time": ended_at.isoformat() if ended_at else None,
+                "status": call_row["status"] or "completed",
+            }
+            # caller_number → customer_phone (NULL/empty 면 키 자체를 비워 둠)
+            normalized_phone = normalize_korean_phone(call_row["caller_number"])
+            if normalized_phone:
+                metadata["customer_phone"] = normalized_phone
+
             return {
-                "metadata": {
-                    "call_id": call_id,
-                    "tenant_id": str(call_row["tenant_id"]),
-                    "start_time": started_at.isoformat() if started_at else None,
-                    "end_time": ended_at.isoformat() if ended_at else None,
-                    "status": call_row["status"] or "completed",
-                    "customer_phone": call_row["caller_number"],
-                },
+                "metadata": metadata,
                 "transcripts": transcripts,
                 "branch_stats": _parse_jsonb(call_row["branch_stats"]),
             }
