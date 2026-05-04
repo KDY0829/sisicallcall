@@ -419,17 +419,210 @@ OAuth 완료 후에도 connector real-execute는 현재 `skipped("tenant_token_f
 
 ### 9-3. Notion (env-based)
 
+Notion connector는 OAuth가 아닌 **Internal Integration Token + Database
+ID** 방식을 사용한다. `app/services/mcp/connectors/notion_connector.py`
+가 Notion REST API (`POST https://api.notion.com/v1/pages`)를 직접 호출한다.
+
+#### (a) Notion에서 직접 해야 하는 작업
+
+1. Notion → Settings & members → Connections → **"Develop or manage integrations"**
+   → "New integration".
+   - Type: **Internal**
+   - Capabilities: Read content / Update content / Insert content
+     (insert만 있어도 record 생성은 된다)
+   - 발급된 **Internal Integration Token** 을 복사한다 (`secret_...`).
+2. 새 Notion Database 생성. Inline / Full page 둘 다 가능.
+   - 아래 §(c) 표에 적힌 **속성 이름과 타입을 정확히** 일치시켜야 한다.
+     이름이나 타입이 다르면 Notion API가 `validation_error`를 반환해
+     `mcp_action_logs.error_message=notion_api_error:400` 으로 기록된다.
+   - select 필드는 **옵션 이름**도 §(d) 와 일치해야 한다 (대소문자 포함).
+3. DB 우상단 `...` → **Connect to integration** → 1번에서 만든 integration
+   선택. (이 단계가 빠지면 `notion_api_error:404` 가 나온다.)
+4. DB URL에서 32자리 hex (`...?v=` 앞부분)를 복사 — 이게 `NOTION_DATABASE_ID`.
+   대시 포함 UUID 형태(`xxxxxxxx-xxxx-...`)도 허용된다.
+
+#### (b) `.env` 변수
+
+```text
+# 필수 — 두 변수 모두 채워야 connector가 real path로 진입한다.
+NOTION_MCP_REAL=true
+NOTION_API_TOKEN=secret_...                # Notion Internal Integration Token
+NOTION_DATABASE_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# planner가 통화 1건당 create_notion_call_record action을 만들지 여부
+POST_CALL_ENABLE_NOTION_RECORD=true
+```
+
+> 어느 하나라도 비어 있으면 connector는 `skipped("notion_not_configured")`
+> 로 끝난다 (`notion_connector.py:74`).
+
+#### (c) DB 필드 명세 (필수 — 이름·타입 정확히 일치)
+
+| Notion 속성 이름 | 타입 | 필수 | 비고 |
+|---|---|:-:|---|
+| `Name` | Title | O | DB 생성 시 기본 Title 컬럼 이름을 `Name` 으로 둔다. `[create-notion-call-record] <call_id>` 형식으로 채워진다 |
+| `Call ID` | Text (rich_text) | O | calls.id |
+| `Tenant ID` | Text (rich_text) | O | calls.tenant_id |
+| `Customer Emotion` | Select | O | §(d-1) 옵션 |
+| `Priority` | Select | O | §(d-2) 옵션 |
+| `Resolution Status` | Select | O | §(d-3) 옵션 |
+| `Summary` | Text (rich_text) | O | summary_short 우선, 최대 2000자 |
+| `VOC Category` | Text (rich_text) | O | intent_result.primary_category |
+| `Action Required` | Checkbox | O | VOC priority의 action_required |
+| `Created At` | Date | O | UTC ISO timestamp |
+
+> connector는 `params`에 `customer_emotion` / `priority` /
+> `resolution_status` 가 없으면 해당 select 필드 자체를 omit 한다 — 즉 빈
+> 값이면 row에서 그 필드가 비어 있을 뿐 에러가 나진 않는다. 하지만 select
+> 옵션이 **없는 값**이 들어오면 Notion이 `validation_error`를 던지므로
+> §(d) 옵션은 미리 만들어 두는 것이 안전하다.
+
+#### (d) Select 옵션 (필수 — Notion DB 생성 시 미리 추가)
+
+옵션 값은 `app/agents/post_call/schemas.py`의 enum과 일치한다.
+
+##### (d-1) `Customer Emotion`
+
+| 옵션 이름 | 출처 |
+|---|---|
+| `positive` | `CustomerEmotion.positive` |
+| `neutral` | `CustomerEmotion.neutral` (기본값) |
+| `negative` | `CustomerEmotion.negative` |
+| `angry` | `CustomerEmotion.angry` |
+
+##### (d-2) `Priority`
+
+| 옵션 이름 | 출처 |
+|---|---|
+| `low` | `PriorityLevel.low` (기본값) |
+| `medium` | `PriorityLevel.medium` |
+| `high` | `PriorityLevel.high` |
+| `critical` | `PriorityLevel.critical` |
+
+##### (d-3) `Resolution Status`
+
+| 옵션 이름 | 출처 |
+|---|---|
+| `resolved` | `ResolutionStatus.resolved` (기본값) |
+| `escalated` | `ResolutionStatus.escalated` |
+| `abandoned` | `ResolutionStatus.abandoned` |
+
+> 색상은 무엇이든 무방하다. **이름 문자열만** 정확히 일치하면 된다.
+
+#### (e) readiness 확인
+
+코드 수정 없이 readiness 스크립트로 env가 제대로 읽히는지 검증할 수 있다.
+
+```bash
+# .env 채운 뒤
+python scripts/check_post_call_integrations.py --tenant-id <uuid>
+```
+
+기대 출력 (provider 라인):
+
+```text
+notion             configured             ...
+```
+
+env 미충족이면:
+
+```text
+notion             missing                reason=missing env: NOTION_API_TOKEN, NOTION_DATABASE_ID
+```
+
+JSON으로 정확히 확인:
+
+```bash
+python scripts/check_post_call_integrations.py --tenant-id <uuid> --json | \
+  python -c "import json,sys; p=json.load(sys.stdin)['providers']['notion']; print(p)"
+```
+
+#### (f) (선택) 기존 mock log 삭제
+
+직전에 mock 모드로 돌렸던 흔적이 남아 있어 real 결과와 헷갈린다면:
+
+```sql
+-- 특정 tenant의 notion mock log 만 삭제 (real 결과는 보존)
+DELETE FROM mcp_action_logs
+WHERE tenant_id = '<tenant_id>'
+  AND tool_name = 'notion'
+  AND external_id LIKE 'notion-mock-%';
+```
+
+#### (g) real action 실행
+
 ```bash
 NOTION_MCP_REAL=true \
 NOTION_API_TOKEN=secret_... \
 NOTION_DATABASE_ID=... \
 POST_CALL_ENABLE_NOTION_RECORD=true \
   python scripts/run_post_call_from_db.py \
-  --call-id <uuid> --tenant-id <uuid> --llm-mode mock \
-  --real-actions --only-tool notion
+  --call-id <call_uuid> --tenant-id <tenant_uuid> \
+  --llm-mode mock --real-actions --only-tool notion
 ```
 
-설정 누락 시: `skipped("notion_not_configured")`.
+> Windows PowerShell에서는 `$env:NOTION_MCP_REAL="true"; ...; python ...`
+> 로 한 줄씩 설정하거나 `.env`에 채워두면 된다.
+
+#### (h) 성공 판정 — DB 확인 SQL
+
+real action 성공 시 `external_id`는 Notion page id (32자리 hex 또는 대시
+포함 UUID) 가 들어간다. mock 은 `notion-mock-<call_id>` 형태이므로 둘은
+한눈에 구분된다.
+
+```sql
+-- 가장 최근 notion 결과 1건 (real / mock 구분)
+SELECT
+  call_id,
+  tenant_id,
+  status,
+  external_id,
+  CASE
+    WHEN external_id LIKE 'notion-mock-%' THEN 'mock'
+    WHEN status = 'success'               THEN 'REAL'
+    ELSE status
+  END AS run_mode,
+  error_message,
+  created_at
+FROM mcp_action_logs
+WHERE tenant_id = '<tenant_id>'
+  AND tool_name = 'notion'
+ORDER BY created_at DESC
+LIMIT 5;
+```
+
+real success 한 건에 대한 보다 강한 판정:
+
+```sql
+SELECT COUNT(*) AS real_success_count
+FROM mcp_action_logs
+WHERE tenant_id = '<tenant_id>'
+  AND tool_name = 'notion'
+  AND status = 'success'
+  AND external_id NOT LIKE 'notion-mock-%';
+```
+
+`real_success_count >= 1` 이면 실제 Notion 페이지가 생성된 것이다.
+
+#### (i) Notion 화면에서 row 확인
+
+1. 위에서 사용한 Notion DB 페이지를 새로고침.
+2. 가장 최근 row의 `Name` 컬럼이 `[create-notion-call-record] <call_id>` 인지 확인.
+3. 해당 row를 열어서 `Call ID`, `Summary`, `VOC Category`, `Customer Emotion`,
+   `Priority`, `Resolution Status`, `Action Required`, `Created At` 가 모두
+   채워져 있는지 확인.
+4. Notion row 우상단의 share/copy link → 페이지 id가 §(h) SQL 결과의
+   `external_id`와 일치하는지 교차 확인 (대시 포함/미포함은 무시 가능).
+
+#### (j) 실패 진단 빠른 표
+
+| 증상 | 원인 | 조치 |
+|---|---|---|
+| status=`skipped`, error=`notion_not_configured` | env 한쪽이 비었거나 공백만 있음 | `.env` 재확인, `--tenant-id` 검사 스크립트로 재검증 |
+| status=`failed`, error=`notion_api_error:401` | 토큰 형식이 잘못됐거나 만료/회수됨 | Notion integration 페이지에서 token 재발급 |
+| status=`failed`, error=`notion_api_error:404` | DB id 오타 또는 integration이 DB에 connect되지 않음 | §(a) 3번 단계 (Connect to integration) 재수행 |
+| status=`failed`, error=`notion_api_error:400` | 속성 이름/타입/select 옵션 불일치 | §(c)·§(d) 표 기준으로 DB 속성 재구성 |
+| status=`failed`, error=`notion_exception:...` | 네트워크/timeout/JSON 파싱 등 | 로그의 예외 클래스명 기준으로 재시도 |
 
 ### 9-4. SMS / Solapi (env-based)
 

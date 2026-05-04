@@ -57,8 +57,23 @@ def _c(color: str, text: str) -> str:
 INTERNAL_PROVIDERS = {"company_db", "internal_dashboard"}
 
 # Providers configured at environment/runtime level rather than per-tenant OAuth.
-# (sms uses Twilio env config + customer phone; not blocked by tenant_integrations.)
-ENV_CONFIGURED_PROVIDERS = {"sms"}
+# - sms uses Solapi env config + customer phone (action-level dependency).
+# - notion uses NOTION_API_TOKEN + NOTION_DATABASE_ID; OAuth는 미사용.
+ENV_CONFIGURED_PROVIDERS = {"sms", "notion"}
+
+
+def _notion_env_ready() -> tuple[bool, str | None]:
+    """Notion은 env 기반이므로 NOTION_API_TOKEN + NOTION_DATABASE_ID가 모두 있어야 ready."""
+    token = (os.getenv("NOTION_API_TOKEN") or "").strip()
+    db_id = (os.getenv("NOTION_DATABASE_ID") or "").strip()
+    if token and db_id:
+        return True, None
+    missing: list[str] = []
+    if not token:
+        missing.append("NOTION_API_TOKEN")
+    if not db_id:
+        missing.append("NOTION_DATABASE_ID")
+    return False, f"missing env: {', '.join(missing)}"
 
 # All providers we surface in the report. Order matters for console display.
 ALL_PROVIDERS = [
@@ -195,6 +210,15 @@ def normalize_provider_status(
             **base_meta,
         }
     if provider in ENV_CONFIGURED_PROVIDERS:
+        if provider == "notion":
+            ready, missing_reason = _notion_env_ready()
+            return {
+                "status": "configured" if ready else "missing",
+                "ready": ready,
+                "reason": missing_reason or "env/provider level config required",
+                "scopes": [],
+                **base_meta,
+            }
         return {
             "status": "configured",
             "ready": True,
@@ -259,14 +283,25 @@ def build_action_readiness(provider_statuses: dict[str, dict]) -> dict[str, dict
                 "reason": None,
             }
         elif provider in ENV_CONFIGURED_PROVIDERS:
-            # sms requires both Twilio env config AND a customer_phone — the
-            # readiness check can only confirm one half here.
-            actions[action_type] = {
-                "provider": provider,
-                "ready": False,
-                "ready_label": "needs_customer_phone_or_sms_config",
-                "reason": "sms tool depends on env config + customer_phone",
-            }
+            if provider == "notion":
+                # Notion은 env만 충족되면 action 단계에서도 ready.
+                info = provider_statuses.get(provider, {})
+                ready = bool(info.get("ready"))
+                actions[action_type] = {
+                    "provider": provider,
+                    "ready": ready,
+                    "ready_label": "ready" if ready else "not_ready",
+                    "reason": None if ready else (info.get("reason") or "notion_not_configured"),
+                }
+            else:
+                # sms requires both Solapi env config AND a customer_phone — the
+                # readiness check can only confirm one half here.
+                actions[action_type] = {
+                    "provider": provider,
+                    "ready": False,
+                    "ready_label": "needs_customer_phone_or_sms_config",
+                    "reason": "sms tool depends on env config + customer_phone",
+                }
         elif provider_statuses.get(provider, {}).get("ready"):
             actions[action_type] = {
                 "provider": provider,

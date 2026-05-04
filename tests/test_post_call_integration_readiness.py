@@ -38,6 +38,30 @@ class TestNormalizeProviderStatus:
         # SMS is "ready" at provider level; per-action it requires customer_phone too.
         assert result["ready"] is True
 
+    def test_notion_provider_missing_when_env_unset(self, monkeypatch):
+        """Notion은 env 기반 — token/db_id 미설정이면 missing."""
+        from scripts.check_post_call_integrations import normalize_provider_status
+
+        monkeypatch.delenv("NOTION_API_TOKEN", raising=False)
+        monkeypatch.delenv("NOTION_DATABASE_ID", raising=False)
+
+        result = normalize_provider_status("notion", None)
+        assert result["status"] == "missing"
+        assert result["ready"] is False
+        assert "NOTION_API_TOKEN" in result["reason"]
+        assert "NOTION_DATABASE_ID" in result["reason"]
+
+    def test_notion_provider_configured_when_env_set(self, monkeypatch):
+        """Notion env (token + db_id) 모두 채워지면 configured + ready."""
+        from scripts.check_post_call_integrations import normalize_provider_status
+
+        monkeypatch.setenv("NOTION_API_TOKEN", "secret_dummy")
+        monkeypatch.setenv("NOTION_DATABASE_ID", "db_dummy")
+
+        result = normalize_provider_status("notion", None)
+        assert result["status"] == "configured"
+        assert result["ready"] is True
+
     def test_oauth_provider_no_row_is_missing(self):
         from scripts.check_post_call_integrations import normalize_provider_status
 
@@ -153,8 +177,12 @@ class TestCheckTenantReadiness:
         repo = TenantIntegrationRepository(storage="memory")
         return repo
 
-    def test_no_integrations_all_oauth_providers_missing(self):
+    def test_no_integrations_all_oauth_providers_missing(self, monkeypatch):
         from scripts.check_post_call_integrations import check_tenant_readiness
+
+        # Notion은 env 기반이라 실제 환경의 .env 값 영향을 받지 않도록 격리한다.
+        monkeypatch.delenv("NOTION_API_TOKEN", raising=False)
+        monkeypatch.delenv("NOTION_DATABASE_ID", raising=False)
 
         result = check_tenant_readiness("tid-empty", self._repo())
 
