@@ -92,3 +92,29 @@ class RedisSessionService:
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
         )
+
+    async def set_vision_id(self, call_id: str, vision_id: str) -> None:
+        """vision_branch 가 SMS 발송 후 통화 세션에 vision_id 기록 — 재진입 시 폴링용."""
+        view = await self.load(call_id)
+        view["vision_id"] = vision_id
+        await self._client.set(
+            self._key(call_id),
+            json.dumps(view, ensure_ascii=False),
+            ex=_TTL_SECONDS,
+        )
+
+    async def get_vision_id(self, call_id: str) -> str | None:
+        view = await self.load(call_id)
+        return view.get("vision_id")
+
+    async def clear_vision_id(self, call_id: str) -> None:
+        """vision 결과 처리 후 정리 — 새 vision 사이클을 위해 호출."""
+        view = await self.load(call_id)
+        if "vision_id" not in view:
+            return
+        del view["vision_id"]
+        await self._client.set(
+            self._key(call_id),
+            json.dumps(view, ensure_ascii=False),
+            ex=_TTL_SECONDS,
+        )
