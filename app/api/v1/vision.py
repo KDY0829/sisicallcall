@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
-from app.services.vision.mock import MockVisionService
+from app.services.vision.convnextv2 import ConvNeXtV2VisionService
 from app.services.vision.session import VisionSessionService
 from app.utils.logger import get_logger
 
@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 _session_svc = VisionSessionService()
-_classifier = MockVisionService()  # TODO: EfficientNet-B0 학습 완료 시 교체
+_classifier = ConvNeXtV2VisionService()
 
 _VISION_PAGE_HTML = (
     Path(__file__).parent.parent.parent / "static" / "vision_upload.html"
