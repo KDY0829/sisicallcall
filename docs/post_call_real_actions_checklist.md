@@ -634,7 +634,28 @@ SOLAPI_API_KEY=... SOLAPI_API_SECRET=... SOLAPI_SENDER_NUMBER=... \
   --real-actions --only-tool sms
 ```
 
-`customer_phone` 누락 시: `skipped("customer_phone_missing")`.
+수신번호 결정 우선순위 (`sms_connector.py:execute`):
+
+1. `params.to`
+2. `params.customer_phone` (`calls.caller_number` → `metadata.customer_phone`)
+3. `os.getenv("SMS_TEST_TO")` — **테스트/시연용 fallback**
+
+세 가지가 모두 비어 있을 때만 `skipped("customer_phone_missing")` 가 된다.
+
+#### SMS_TEST_TO fallback
+
+`.env` 의 `SMS_TEST_TO` 가 채워져 있으면 `customer_phone` 부재 시 자동
+fallback 으로 사용된다 (`+82-...`, `010-...` 등 어느 표기든
+`normalize_korean_phone()` 으로 `01012345678` 형식으로 통일됨). fallback 이
+실제 사용된 회차에는 connector 가 다음 warning 을 남긴다:
+
+```text
+SMSConnector: customer_phone 없음 — SMS_TEST_TO fallback 사용 call_id=...
+```
+
+> ⚠️ **운영 배포 시 `SMS_TEST_TO` 는 반드시 unset 또는 빈 값으로 둘 것.**
+> caller_number 가 비어 있는 통화에서 의도치 않게 테스트 번호로 SMS 가
+> 발송될 수 있다. 시연/검증이 끝난 즉시 `.env` 에서 제거하거나 주석 처리.
 
 ### 9-5. Jira
 
