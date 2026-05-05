@@ -1,6 +1,8 @@
+import asyncio
 import audioop
 import base64
 import json
+import time
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
@@ -56,6 +58,7 @@ async def call_ws(websocket: WebSocket):
     silence_count = 0
     had_speech = False
     stream_sid = None
+    is_speaking = False  # TTS 송출 중 플래그 — Mode A (Stage 1b) 자기루프 방지
 
     try:
         while True:
@@ -74,8 +77,12 @@ async def call_ws(websocket: WebSocket):
                 ratecv_state = None
                 silence_count = 0
                 had_speech = False
+                is_speaking = False
 
             elif event == "media":
+                if is_speaking:
+                    continue  # TTS 송출 중엔 사용자 발화 무시 — barge-in 은 Stage 3 에서 도입
+
                 mulaw = base64.b64decode(msg["media"]["payload"])
                 audio_buffer.extend(mulaw)
 
@@ -90,22 +97,51 @@ async def call_ws(websocket: WebSocket):
                     is_speech = await _vad.detect(frame)
 
                     if is_speech:
+                        if not had_speech:
+                            print("[VAD] 발화 시작")
                         silence_count = 0
                         had_speech = True
                     else:
+                        if had_speech and silence_count == 0:
+                            print("[VAD] 침묵 카운트 시작")
                         silence_count += 1
                         if silence_count >= _SILENCE_THRESHOLD and had_speech:
-                            print(f"[VAD] 침묵 감지 — {len(audio_buffer)} bytes → STT")
+                            print(f"[VAD] 침묵 임계 도달 — {len(audio_buffer)}B → STT")
+
+                            t_stt = time.perf_counter()
                             transcript = await _stt.transcribe(bytes(audio_buffer))
-                            print(f"[STT] '{transcript}'")
+                            stt_ms = (time.perf_counter() - t_stt) * 1000
+                            print(f"[STT] '{transcript}' ({stt_ms:.0f}ms, in={len(audio_buffer)}B)")
+
                             audio_buffer.clear()
                             silence_count = 0
                             had_speech = False
 
                             if transcript and stream_sid:
+                                t_tts = time.perf_counter()
                                 tts_audio = await _tts.synthesize(transcript)
-                                print(f"[TTS] {len(tts_audio)} bytes → Twilio 송출")
+                                tts_ms = (time.perf_counter() - t_tts) * 1000
+                                print(f"[TTS] synth {tts_ms:.0f}ms, out={len(tts_audio)}B")
+
+                                is_speaking = True
+                                t_send = time.perf_counter()
                                 await _send_audio_to_twilio(websocket, stream_sid, tts_audio)
+                                send_ms = (time.perf_counter() - t_send) * 1000
+                                print(f"[TTS] 송출 {send_ms:.0f}ms")
+
+                                # 실제 재생 시간만큼 대기 — Twilio 큐가 비워질 때까지 is_speaking 유지
+                                # (송출 ≠ 재생. mulaw 8kHz = 8000B/s)
+                                play_sec = len(tts_audio) / 8000
+                                await asyncio.sleep(play_sec)
+                                is_speaking = False
+                                print(f"[TTS] 재생 끝 ({play_sec:.2f}s)")
+
+                                # TTS 후 buffer / VAD state 일괄 리셋 — 잔향/echo 누적 방지
+                                audio_buffer.clear()
+                                pcm_buffer.clear()
+                                ratecv_state = None
+                                silence_count = 0
+                                had_speech = False
 
             elif event == "stop":
                 print("[WS] stop")
