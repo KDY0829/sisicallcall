@@ -15,7 +15,7 @@ from app.services.session.redis_session import RedisSessionService
 from app.services.speaker_verify import enrollment as voiceprint_enrollment
 from app.services.speaker_verify import get_speaker_verify_service
 from app.services.stt.deepgram import DeepgramSTTService
-from app.services.tenant import DEFAULT_INDUSTRY, DEFAULT_NAME, get_tenant_meta, resolve_tenant_id
+from app.services.tenant import DEFAULT_INDUSTRY, DEFAULT_NAME, get_greeting, get_tenant_meta, resolve_tenant_id
 from app.services.tts.azure import AzureTTSService
 from app.services.vad.silero_vad import SileroVADService
 from app.utils.config import settings
@@ -165,6 +165,35 @@ async def call_ws(websocket: WebSocket):
                                 if inserted:
                                     db_call_id = inserted
                                     print(f"[DB] calls INSERT db_call_id={db_call_id}")
+
+                            # Stage 4d — greeting 자동 송출 (사용자 첫 발화 기다리지 않음)
+                            try:
+                                greeting = await get_greeting(tenant_id, within_hours=True)
+                                print(f"[GREETING] '{greeting[:60]}'")
+                                tts_audio = await _tts.synthesize(greeting)
+                                is_speaking = True
+                                await _send_audio_to_twilio(websocket, stream_sid, tts_audio)
+                                play_sec = len(tts_audio) / 8000
+                                await asyncio.sleep(play_sec)
+                                is_speaking = False
+                                print(f"[GREETING] 재생 끝 ({play_sec:.2f}s)")
+                                # transcripts INSERT — turn 0 agent (사용자 첫 발화는 turn 1 부터)
+                                if db_call_id:
+                                    await insert_transcript(
+                                        db_call_id, turn_index, "agent", greeting,
+                                        response_path=None,
+                                    )
+                                    turn_index += 1
+                                # buffer reset — greeting 잔향이 enrollment 에 섞이지 않게
+                                audio_buffer.clear()
+                                pcm_buffer.clear()
+                                utterance_pcm.clear()
+                                ratecv_state = None
+                                silence_count = 0
+                                had_speech = False
+                            except Exception as e:
+                                is_speaking = False
+                                print(f"[GREETING] failed: {e} — silent")
                     except Exception as e:
                         print(f"[GRAPH] tenant_meta load failed: {e} → echo fallback this call")
 
