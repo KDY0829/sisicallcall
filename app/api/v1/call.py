@@ -6,6 +6,7 @@ import os
 import time
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
+from twilio.rest import Client as TwilioRestClient
 
 from app.agents.conversational.graph import build_graph
 from app.agents.post_call.runner import run_post_call_agent_safely
@@ -27,6 +28,11 @@ _vad = SileroVADService()
 _verifier = get_speaker_verify_service()
 _graph = build_graph()
 _session = RedisSessionService()
+_twilio_rest = (
+    TwilioRestClient(settings.twilio_account_sid, settings.twilio_auth_token)
+    if settings.twilio_account_sid and settings.twilio_auth_token
+    else None
+)
 
 # Stage 4a — graph 통합 (echo 회귀 환경변수)
 _GRAPH_ENABLED = os.getenv("GRAPH_INTEGRATION_ENABLED", "false").lower() in ("1", "true", "yes")
@@ -271,6 +277,7 @@ async def call_ws(websocket: WebSocket):
                                 # Stage 4a — graph 호출 분기 (실패 시 echo 회귀)
                                 response_text = transcript  # 기본 echo
                                 graph_intent: str | None = None
+                                should_hangup = False
                                 if _GRAPH_ENABLED and tenant_id:
                                     try:
                                         session_view = await _session.load(stream_sid)
@@ -286,13 +293,16 @@ async def call_ws(websocket: WebSocket):
                                             "rewritten_query": "",
                                             "is_clear": False,
                                             "missing_info": "",
+                                            "is_goodbye": False,
+                                            "should_hangup": False,
                                         }
                                         t_graph = time.perf_counter()
                                         result = await _graph.ainvoke(graph_state)
                                         graph_ms = (time.perf_counter() - t_graph) * 1000
                                         graph_resp = result.get("response_text", "")
                                         graph_intent = result.get("intent") or None
-                                        print(f"[GRAPH] intent={graph_intent} resp='{graph_resp[:60]}' ({graph_ms:.0f}ms)")
+                                        should_hangup = bool(result.get("should_hangup", False))
+                                        print(f"[GRAPH] intent={graph_intent} resp='{graph_resp[:60]}' hangup={should_hangup} ({graph_ms:.0f}ms)")
                                         if graph_resp:
                                             response_text = graph_resp
                                             await _session.append_turn(stream_sid, transcript, graph_resp)
@@ -337,6 +347,17 @@ async def call_ws(websocket: WebSocket):
                                 ratecv_state = None
                                 silence_count = 0
                                 had_speech = False
+
+                                # Polish — goodbye 분기에서 should_hangup=True → Twilio REST API hangup
+                                if should_hangup and twilio_call_sid and _twilio_rest is not None:
+                                    try:
+                                        await asyncio.to_thread(
+                                            _twilio_rest.calls(twilio_call_sid).update,
+                                            status="completed",
+                                        )
+                                        print(f"[HANGUP] Twilio call terminated: {twilio_call_sid}")
+                                    except Exception as e:
+                                        print(f"[HANGUP] failed: {e}")
 
             elif event == "stop":
                 print("[WS] stop")
