@@ -175,6 +175,23 @@ def test_list_calls_with_valid_token_returns_200_and_uses_jwt_tenant(monkeypatch
     assert resp.json()["data"]["limit"] == 100
 
 
+def test_list_calls_status_all_omits_status_filter(monkeypatch):
+    _patch_admin_lookup(monkeypatch)
+    captured: list[dict] = []
+
+    async def fake_list_calls_for_tenant(**kwargs):
+        captured.append(kwargs)
+        return {"items": [_call_payload()], "total": 1}
+
+    monkeypatch.setattr(call_history, "list_calls_for_tenant", fake_list_calls_for_tenant)
+
+    resp = _client().get("/call?status=all", headers=_auth_headers())
+
+    assert resp.status_code == 200
+    assert captured[0]["tenant_id"] == TENANT_ID
+    assert captured[0]["status"] is None
+
+
 def test_list_calls_query_tenant_mismatch_returns_403(monkeypatch):
     _patch_admin_lookup(monkeypatch)
 

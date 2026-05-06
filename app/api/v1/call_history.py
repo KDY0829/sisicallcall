@@ -42,6 +42,17 @@ def _validate_query_tenant_id(query_tenant_id: str | None, jwt_tenant_id: str) -
         )
 
 
+def _normalize_status_filter(status_filter: str | None) -> str | None:
+    if status_filter is None:
+        return None
+
+    normalized = status_filter.strip()
+    if not normalized or normalized.lower() == "all":
+        return None
+
+    return normalized
+
+
 @router.get("")
 async def list_calls(
     status_filter: str | None = Query(default=None, alias="status"),
@@ -59,7 +70,7 @@ async def list_calls(
 
     result = await list_calls_for_tenant(
         tenant_id=jwt_tenant_id,
-        status=status_filter,
+        status=_normalize_status_filter(status_filter),
         started_from=started_from,
         started_to=started_to,
         offset=offset,
