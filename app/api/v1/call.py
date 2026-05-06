@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import time
+import traceback
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from twilio.rest import Client as TwilioRestClient
@@ -38,7 +39,7 @@ _twilio_rest = (
 _GRAPH_ENABLED = os.getenv("GRAPH_INTEGRATION_ENABLED", "false").lower() in ("1", "true", "yes")
 
 _VAD_FRAME_BYTES = 1024     # linear16 16kHz, 512 samples
-_SILENCE_THRESHOLD = 30     # 연속 침묵 VAD 프레임 수 (~960ms)
+_SILENCE_THRESHOLD = 50     # 연속 침묵 VAD 프레임 수 (~1600ms)
 _TWILIO_CHUNK_BYTES = 160   # 20ms mulaw 8kHz — Twilio 권장 단위
 
 
@@ -311,23 +312,48 @@ async def call_ws(websocket: WebSocket):
                                     except Exception as e:
                                         print(f"[GRAPH] error: {e} → echo fallback")
 
-                                # Stage 4c-2 — transcripts INSERT 양방향 (TTS 송출 전)
+                                # Stage 4c-2 — transcripts INSERT 양방향 (TTS 송출 전).
+                                # DB 실패해도 통화 지속 (DB 누락만, traceback 명시).
                                 if db_call_id:
-                                    await insert_transcript(
-                                        db_call_id, turn_index, "customer", transcript,
-                                    )
-                                    await insert_transcript(
-                                        db_call_id, turn_index, "agent", response_text,
-                                        response_path=_intent_to_response_path(graph_intent),
-                                    )
-                                    turn_index += 1
+                                    try:
+                                        await insert_transcript(
+                                            db_call_id, turn_index, "customer", transcript,
+                                        )
+                                        await insert_transcript(
+                                            db_call_id, turn_index, "agent", response_text,
+                                            response_path=_intent_to_response_path(graph_intent),
+                                        )
+                                        turn_index += 1
+                                    except Exception as exc:
+                                        print(f"[DB] transcripts INSERT 실패 (통화 지속): {type(exc).__name__}: {exc}")
+                                        traceback.print_exc()
 
-                                t_tts = time.perf_counter()
-                                tts_audio = await _tts.synthesize(response_text)
-                                tts_ms = (time.perf_counter() - t_tts) * 1000
-                                print(f"[TTS] synth {tts_ms:.0f}ms, out={len(tts_audio)}B")
+                                # TTS synth — 실패 시 polite fallback 멘트로 1회 재시도, 그것도 실패면 silent skip.
+                                tts_audio = b""
+                                try:
+                                    t_tts = time.perf_counter()
+                                    tts_audio = await _tts.synthesize(response_text)
+                                    tts_ms = (time.perf_counter() - t_tts) * 1000
+                                    print(f"[TTS] synth {tts_ms:.0f}ms, out={len(tts_audio)}B")
+                                except Exception as exc:
+                                    print(f"[TTS] synth 실패: {type(exc).__name__}: {exc}")
+                                    traceback.print_exc()
+                                    try:
+                                        tts_audio = await _tts.synthesize(
+                                            "잠시 문제가 생겼어요. 다시 말씀해주세요."
+                                        )
+                                        print(f"[TTS] fallback synth ok out={len(tts_audio)}B")
+                                    except Exception as exc2:
+                                        print(f"[TTS] fallback 도 실패 (silent skip): {type(exc2).__name__}: {exc2}")
+                                        tts_audio = b""
+
+                                if not tts_audio:
+                                    # silent skip — 다음 turn 으로
+                                    continue
 
                                 is_speaking = True
+                                # _send_audio_to_twilio 실패 = WebSocket 손상 신호. raise 해서
+                                # outer except Exception 분기가 정리/traceback 처리.
                                 t_send = time.perf_counter()
                                 await _send_audio_to_twilio(websocket, stream_sid, tts_audio)
                                 send_ms = (time.perf_counter() - t_send) * 1000
@@ -369,11 +395,16 @@ async def call_ws(websocket: WebSocket):
                             await _session.clear(stream_sid)
                         except Exception as e:
                             print(f"[GRAPH] session clear failed: {e}")
-                # Stage 4c-1 — calls UPDATE finalize (Twilio 정상 종료)
+                # Stage 4c-1 — calls UPDATE finalize (Twilio 정상 종료).
+                # finalize 실패해도 break 는 진행 — outer 가 잡지 않게.
                 if db_call_id:
                     duration_sec = int(time.perf_counter() - call_started_at) if call_started_at else None
-                    await finalize_call(db_call_id, "completed", duration_sec)
-                    print(f"[DB] finalize_call db_call_id={db_call_id} status=completed dur={duration_sec}s")
+                    try:
+                        await finalize_call(db_call_id, "completed", duration_sec)
+                        print(f"[DB] finalize_call db_call_id={db_call_id} status=completed dur={duration_sec}s")
+                    except Exception as e:
+                        print(f"[DB] finalize_call failed: {e}")
+                        traceback.print_exc()
                     # Stage 4c-3 — post_call agent fire-and-forget
                     if tenant_id:
                         asyncio.create_task(
@@ -383,7 +414,7 @@ async def call_ws(websocket: WebSocket):
                 break
 
     except WebSocketDisconnect:
-        print("[WS] 연결 끊김")
+        print("[WS] 연결 끊김 (사용자/Twilio)")
         if stream_sid:
             _verifier.cleanup(stream_sid)
             voiceprint_enrollment.cleanup(stream_sid)
@@ -395,11 +426,41 @@ async def call_ws(websocket: WebSocket):
         # Stage 4c-1 — calls UPDATE finalize (사용자 먼저 끊음)
         if db_call_id:
             duration_sec = int(time.perf_counter() - call_started_at) if call_started_at else None
-            await finalize_call(db_call_id, "abandoned", duration_sec)
-            print(f"[DB] finalize_call db_call_id={db_call_id} status=abandoned dur={duration_sec}s")
+            try:
+                await finalize_call(db_call_id, "abandoned", duration_sec)
+                print(f"[DB] finalize_call db_call_id={db_call_id} status=abandoned dur={duration_sec}s")
+            except Exception as e:
+                print(f"[DB] finalize_call failed: {e}")
+                traceback.print_exc()
             # Stage 4c-3 — post_call agent fire-and-forget (abandoned 통화도 분석 트리거)
             if tenant_id:
                 asyncio.create_task(
                     run_post_call_agent_safely(db_call_id, "call_ended", tenant_id)
                 )
                 print(f"[POST_CALL] triggered db_call_id={db_call_id} tenant_id={tenant_id}")
+    except Exception as exc:
+        # WebSocketDisconnect 외 unhandled 예외 — Twilio 입장에선 우리가 close = Error 31921.
+        # traceback 을 stdout 으로 명시 출력해 logs/{date}/stdout_*.log 에 잡히게.
+        print(f"[WS] 비정상 종료: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        if stream_sid:
+            try:
+                _verifier.cleanup(stream_sid)
+                voiceprint_enrollment.cleanup(stream_sid)
+                if _GRAPH_ENABLED:
+                    await _session.clear(stream_sid)
+            except Exception as e:
+                print(f"[WS] cleanup failed: {e}")
+        if db_call_id:
+            duration_sec = int(time.perf_counter() - call_started_at) if call_started_at else None
+            try:
+                await finalize_call(db_call_id, "abandoned", duration_sec)
+                print(f"[DB] finalize_call db_call_id={db_call_id} status=abandoned (server error) dur={duration_sec}s")
+            except Exception as e:
+                print(f"[DB] finalize_call failed: {e}")
+                traceback.print_exc()
+            if tenant_id:
+                asyncio.create_task(
+                    run_post_call_agent_safely(db_call_id, "call_ended", tenant_id)
+                )
+                print(f"[POST_CALL] triggered (server error) db_call_id={db_call_id} tenant_id={tenant_id}")

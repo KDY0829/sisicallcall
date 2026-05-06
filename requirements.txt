@@ -82,6 +82,12 @@ python-multipart==0.0.12
 # opendataloader-pdf: Java 기반 파서 — JSON tree (heading level / table row-cell / list item) 출력 (JVM 11+ 필요)
 opendataloader-pdf==2.3.0
 
+# Hybrid Retrieval (Path A — Dense + BM25)
+# rank_bm25: BM25Okapi (in-memory, pure Python). 한국어 짧은 단어 query 의 lexical match 보강.
+# kiwipiepy: Kiwi 형태소 분석기 (한국어 STT 변형/조사 분리).
+rank_bm25==0.2.2
+kiwipiepy==0.23.1
+
 # post-call Agent
 typing_extensions
 

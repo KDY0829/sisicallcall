@@ -167,19 +167,27 @@ class Chunk:
     page: int               # 시작 페이지
     bbox: Optional[list[float]]
     raw_table: Optional[dict] = None  # table 청크만 — 자연어화 LLM 입력용
+    heading_path: list[str] = field(default_factory=list)  # L2 이상 hierarchy (L1 은 거의 모든 청크 공통이라 제외)
 
 
 def _group_into_chunks(elements: list[FlatElement]) -> list[Chunk]:
     """flat element list → 의미 단위 Chunk list.
 
     규칙:
-      - heading 만나면 누적 section flush + heading 갱신 (heading 자체는 본문에 X — title 로만 사용)
+      - heading 만나면 누적 section flush + heading stack 갱신 (heading 자체는 본문에 X)
       - table 만나면 누적 flush 후 단독 청크 (절대 split X)
       - paragraph/list 누적, MAX_CHUNK_CHARS 초과 시 자동 flush
+      - chunk 마다 현재 heading hierarchy snapshot — L1 제외 L2 이상만 path 로
     """
     chunks: list[Chunk] = []
-    current_heading = ""
+    heading_stack: list[tuple[int, str]] = []  # (level, text), L1 부터 가장 깊은 level 까지
     current_section: list[FlatElement] = []
+
+    def current_heading() -> str:
+        return heading_stack[-1][1] if heading_stack else ""
+
+    def current_path() -> list[str]:
+        return [t for lv, t in heading_stack if lv >= 2]
 
     def flush_section():
         nonlocal current_section
@@ -190,7 +198,8 @@ def _group_into_chunks(elements: list[FlatElement]) -> list[Chunk]:
             current_section = []
             return
         chunks.append(Chunk(
-            heading=current_heading,
+            heading=current_heading(),
+            heading_path=current_path(),
             chunk_type="section",
             text=text,
             page=current_section[0].page,
@@ -202,11 +211,15 @@ def _group_into_chunks(elements: list[FlatElement]) -> list[Chunk]:
     for elem in elements:
         if elem.type == "heading":
             flush_section()
-            current_heading = elem.text
+            level = elem.heading_level if elem.heading_level is not None else 99
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            heading_stack.append((level, elem.text))
         elif elem.type == "table":
             flush_section()
             chunks.append(Chunk(
-                heading=current_heading,
+                heading=current_heading(),
+                heading_path=current_path(),
                 chunk_type="table",
                 text=elem.text,
                 page=elem.page,
@@ -237,6 +250,7 @@ def _merge_short(chunks: list[Chunk]) -> list[Chunk]:
             prev = merged[-1]
             merged[-1] = Chunk(
                 heading=prev.heading,
+                heading_path=prev.heading_path,
                 chunk_type="section",
                 text=prev.text + "\n\n" + c.text,
                 page=prev.page,
@@ -630,10 +644,15 @@ class PDFProcessor:
             # 이 시점부터 모든 chunk.text 가 polished/자연어화 상태
             final_texts = [c.text for c in chunks_obj]
 
-            # 3. 임베딩 (passage 측 — BGE-M3 prefix 미적용)
-            embeddings = await self._embedder.embed_passages(final_texts)
+            # 3. 임베딩 (passage 측 — heading_path prepend 으로 큰 청크의 sub-topic 매칭 보강)
+            #    chunk.text 자체는 보존 (humanize 단계에 원본 전달). 임베딩에만 path 포함.
+            embed_texts = [
+                f"[{' > '.join(c.heading_path)}]\n\n{c.text}" if c.heading_path else c.text
+                for c in chunks_obj
+            ]
+            embeddings = await self._embedder.embed_passages(embed_texts)
 
-            # 4. 메타 enrich
+            # 4. 메타 enrich (chunk 본문 기반 — path 미포함)
             llm_metas = await _enrich_chunks_with_llm(final_texts, self._llm)
             logger.info(
                 "llm enrich done doc_id=%s metas=%d",
@@ -665,6 +684,7 @@ class PDFProcessor:
                         "chunk_type": chunk.chunk_type,
                         "page_number": int(chunk.page),
                         "bbox": bbox_str,
+                        "heading_path": " > ".join(chunk.heading_path),
                         "llm_title": title[:100],
                         "llm_summary": llm_meta.get("summary", ""),
                         "llm_keywords": keywords_str,

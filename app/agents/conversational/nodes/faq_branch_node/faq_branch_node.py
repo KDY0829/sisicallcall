@@ -3,18 +3,19 @@ from app.services.cache import get_cache
 from app.services.embedding import get_embedder
 from app.services.llm.gpt4o_mini import GPT4OMiniService
 from app.services.rag.chroma import ChromaRAGService
+from app.services.retrieval import HybridRetriever
 from app.utils.config import settings
 
 _llm = GPT4OMiniService()
 _rag = ChromaRAGService()
 _cache = get_cache()
+# HybridRetriever lazy singleton — 첫 검색에서 BM25 인덱스 build 후 재사용.
+# embedder 는 외부 (faq_branch) 에서 주입 — 여기서는 search_with_embedding 만 사용.
+_hybrid = HybridRetriever(rag=_rag)
 
-_TOP_K = 3
-# ChromaDB default L2 distance (정규화 벡터) — 작을수록 유사.
-# 모델별 분포:
-#   - BGE-M3:  정답 0.6~0.85, 무관 1.0+
-#   - Qwen3:   정답 0.5~1.20, 무관 1.21+
-# settings.faq_distance_threshold 로 조정 가능 (.env: FAQ_DISTANCE_THRESHOLD).
+_TOP_K = 5  # Hybrid: dense+bm25 결합이라 single mode 보다 약간 넓게 후보 받음
+# Dense distance pass — ChromaDB default L2 (정규화 벡터, 작을수록 유사).
+# Qwen3 분포: 정답 0.5~1.20, 무관 1.21+. settings.faq_distance_threshold (.env: FAQ_DISTANCE_THRESHOLD).
 _DIST_THRESHOLD = settings.faq_distance_threshold
 # vision 게이트 — model_spec 청크 top_k 진입 자체가 강한 신호.
 _VISION_GATE_THRESHOLD = settings.faq_vision_gate_threshold
@@ -58,13 +59,19 @@ async def faq_branch_node(state: CallState) -> dict:
         print(f"[faq_branch] cache hit distance={cache_hit.distance:.4f}")
         return {"response_text": cache_hit.response_text}
 
-    # 3. RAG 검색 (같은 임베딩 재사용)
-    results = await _rag.search_with_meta(embedding, tenant_id, top_k=_TOP_K)
-    print(f"[faq_branch] query='{query}' results={len(results)}")
+    # 3. Hybrid 검색 (dense + BM25 RRF) — 같은 임베딩 재사용.
+    #    dense 의 짧은 단어 query 약점을 BM25 (Kiwi 형태소) 가 보강.
+    results = await _hybrid.search_with_embedding(
+        query=query, query_embedding=embedding, tenant_id=tenant_id, top_k=_TOP_K,
+    )
+    print(f"[faq_branch] query='{query}' hybrid_results={len(results)}")
     for i, r in enumerate(results):
         meta = r.get("metadata", {}) or {}
+        dist = r.get("distance")
+        bm25 = r.get("bm25_score") or 0
+        dist_str = f"{dist:.3f}" if dist is not None else "-"
         print(
-            f"  [{i+1}] distance={r.get('distance')} "
+            f"  [{i+1}] dense={dist_str} bm25={bm25:.2f} "
             f"title='{meta.get('llm_title', '')}' "
             f"is_auth={meta.get('is_auth', False)} is_vision={meta.get('is_vision', False)}"
         )
@@ -72,11 +79,15 @@ async def faq_branch_node(state: CallState) -> dict:
     if not results:
         return {"response_text": _POLITE_NO_RESULT}
 
-    # 3. 메타데이터 게이트 — distance threshold 이내 청크만 검사 (false positive 방지)
-    related = [
-        r for r in results
-        if r.get("distance") is not None and r["distance"] <= _DIST_THRESHOLD
-    ]
+    # 4. Pass 판정 — dense_pass (distance ≤ threshold) OR bm25_pass (score > 0).
+    #    어느 한쪽이라도 hit 한 청크는 LLM 컨텍스트 후보. 두 retriever 의 OR 로 recall ↑.
+    def _is_passed(r: dict) -> bool:
+        dist = r.get("distance")
+        dense_pass = dist is not None and dist <= _DIST_THRESHOLD
+        bm25_pass = (r.get("bm25_score") or 0) > 0
+        return dense_pass or bm25_pass
+
+    related = [r for r in results if _is_passed(r)]
 
     if any((r.get("metadata") or {}).get("is_auth", False) for r in related):
         print("[faq_branch] is_auth=True 청크 발견 (threshold 이내) → polite auth")
