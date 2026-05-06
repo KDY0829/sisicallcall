@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     chroma_host: str = "localhost"
     chroma_port: int = 8001
 
+    # Embedding provider — "bge-m3" (default, FlagEmbedding) | "qwen3" (sentence-transformers).
+    # swap 시 ChromaDB 의 모든 컬렉션 reseed 필수 (벡터 공간이 모델별로 다름).
+    embedding_provider: str = "qwen3"
+
+    # FAQ RAG distance threshold (ChromaDB default L2). 임베딩 모델에 따라 분포 다름.
+    # - BGE-M3: 0.85 (정답 0.6~0.85, 무관 1.0+)
+    # - Qwen3:  1.15 (정답 0.5~1.20, 무관 1.21+, gap 우월)
+    faq_distance_threshold: float = 1.20
+    # vision 게이트는 일반 humanize 보다 느슨 (model_spec 청크 top_k 진입 자체가 신호).
+    faq_vision_gate_threshold: float = 0.95
+
     # App
     env: str = "development"
     log_level: str = "INFO"
@@ -43,17 +54,18 @@ class Settings(BaseSettings):
     # TTS Output Channel 모드 — "mock" (기본, 테스트/유닛) | "twilio" (프로덕션 WebSocket)
     tts_channel_mode: str = "mock"
 
-    # TitaNet 화자 검증 (대영 R-01 연구 결과 — titanet_large 채택)
-    # threshold 변경 이력:
-    #   0.40 → 0.30 (barge-in false negative 줄이려)
-    #   0.30 → 0.45 (한뼘통화 echo/잔향이 0.30~0.40 회색지대 통과해 거짓 cancel — 2026-04-28)
-    #   0.45 → 0.30 (2026-04-29): 짧은 발화 (1초 미만) sim 0.31 → verified=False → graph
-    #     EOF 사례 다수 (server_220342.log Turn 4). 본인 음성도 짧으면 임베딩 거리가 멀어지는
-    #     TitaNet 한계. echo 위험 재증가하지만 STT fallback (graph.py route_after_speaker_verify)
-    #     이중 안전망과 함께 적용. 실통화 측정 후 0.35 등으로 재조정 가능.
-    titanet_model_name: str = "titanet_large"
-    titanet_similarity_threshold: float = 0.30
-    titanet_enrollment_sec: float = 3.0   # voiceprint 등록에 사용할 첫 발화 누적 시간
+    # Speaker Verification (TitaNet-L ONNX, runtime enrollment)
+    # ONNX 도착 전엔 enabled=False 권장 (회귀 안전망 — verify 자동 bypass).
+    # 모델 도착 시 .env 에서 SPEAKER_VERIFY_ENABLED=true.
+    # threshold/enrollment_sec 는 ONNX 도착 후 실통화로 튜닝 (보통 cosine 0.4~0.6).
+    speaker_verify_enabled: bool = False
+    speaker_verify_model_path: str = "models/speech_verification/titanet_large.onnx"
+    speaker_verify_threshold: float = 0.5
+    speaker_verify_enrollment_sec: float = 3.0
+    # TitaNet 짧은 발화 한계 — 2.0초 미만 발화는 임베딩 신뢰성 낮아 본인 reject 위험.
+    # 미만은 verify 스킵하고 통과 (짧은 응답 보호 + 시연 안정성 우선).
+    # 임베딩 신뢰성 곡선: <1s 매우 불안정, 1~1.5s 불안정, 1.5~2s 경계, 2s+ 안정.
+    speaker_verify_min_audio_sec: float = 2.0
 
     # Silero VAD (v6.2+, 2026-04-30 채택 — 짧은 발화 + 긴 trailing silence reject 해결).
     # logs/2026-04-30/server_100651.log Turn 4/5 사례: "예약은어떻게해요" 0.5s + trailing 1.3s
@@ -112,6 +124,15 @@ class Settings(BaseSettings):
     vision_model_path: str = "models/water_purifier_convnextv2_femto_scripted.pt"
     vision_metadata_path: str = "models/water_purifier_convnextv2_femto_metadata.json"
     vision_device: str = "auto"
+
+    # FAQ 시맨틱 캐시 (faq_branch 전용)
+    # ChromaDB L2 squared distance (BGE-M3 normalized, L2sq = 2(1-cos_sim)).
+    # 0.04 (cos_sim ≥ 0.98) — 진단 결과 (8 paraphrase + 8 unrelated) 에서
+    # false hit 0%, paraphrase 25% hit. 짧은 의문문/도메인 단어 묶임 발화는
+    # BGE-M3 가 표면 매칭으로 unrelated 도 cos 0.97 까지 끌어올려서 위험.
+    # 긴 task/예약 발화 (cos 0.99+) 위주로 캐시 효과. miss 시 RAG fallthrough 정답 보장.
+    cache_distance_threshold: float = 0.04
+    cache_ttl_seconds: int = 86400  # 24h
 
     # extra="ignore" — .env 에 코드에서 제거된 잔여 키(예: 과거 GOOGLE_APPLICATION_CREDENTIALS)
     # 가 있어도 ValidationError 로 죽지 않게. 신규 키는 위 클래스 필드로 명시 정의 필요.
