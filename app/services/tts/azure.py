@@ -9,15 +9,19 @@ from app.utils.config import settings
 class AzureTTSService(BaseTTSService):
 
     def __init__(self):
-        self._speech_config = speechsdk.SpeechConfig(
-            subscription=settings.azure_speech_key,
-            region=settings.azure_speech_region,
-        )
-        self._speech_config.speech_synthesis_voice_name = settings.azure_tts_voice
-        # Twilio Media Stream 호환: mulaw 8kHz 8-bit
-        self._speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Raw8Khz8BitMonoMULaw
-        )
+        self._speech_config = None
+
+    def _get_speech_config(self):
+        if self._speech_config is None:
+            self._speech_config = speechsdk.SpeechConfig(
+                subscription=settings.azure_speech_key,
+                region=settings.azure_speech_region,
+            )
+            self._speech_config.speech_synthesis_voice_name = settings.azure_tts_voice
+            self._speech_config.set_speech_synthesis_output_format(
+                speechsdk.SpeechSynthesisOutputFormat.Raw8Khz8BitMonoMULaw
+            )
+        return self._speech_config
 
     async def synthesize(self, text: str) -> bytes:
         if not text:
@@ -28,7 +32,7 @@ class AzureTTSService(BaseTTSService):
         text = text.replace("~", "에서 ")
 
         synthesizer = speechsdk.SpeechSynthesizer(
-            speech_config=self._speech_config,
+            speech_config=self._get_speech_config(),
             audio_config=None,  # 스피커 출력 비활성화 → 바이트만 반환
         )
 

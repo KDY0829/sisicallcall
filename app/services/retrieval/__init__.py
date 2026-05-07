@@ -47,7 +47,11 @@ async def prewarm_all_tenants() -> None:
 
     hybrid = get_hybrid_retriever()
 
-    conn = await asyncpg.connect(settings.database_url)
+    try:
+        conn = await asyncpg.connect(settings.database_url)
+    except Exception as e:
+        logger.warning("bm25 prewarm skipped — DB 연결 실패: %s", e)
+        return
     try:
         rows = await conn.fetch("SELECT id, name FROM tenants")
     finally:

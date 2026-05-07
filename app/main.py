@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 
-from dotenv import load_dotenv
-load_dotenv()
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=True))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,10 +34,13 @@ async def lifespan(app: FastAPI):
     _logger.info("startup: BM25 ready")
 
     _logger.info("startup: prewarming TTS filler audios...")
-    from app.services.tts.azure import AzureTTSService
-    from app.services.tts.filler import prewarm_fillers
-    await prewarm_fillers(AzureTTSService())
-    _logger.info("startup: filler ready")
+    try:
+        from app.services.tts.azure import AzureTTSService
+        from app.services.tts.filler import prewarm_fillers
+        await prewarm_fillers(AzureTTSService())
+        _logger.info("startup: filler ready")
+    except Exception as e:
+        _logger.warning("startup: filler prewarm skipped — %s", e)
 
     # Cold start warmup — Qwen3 첫 inference / OpenAI httpx / ChromaDB per-tenant.
     # 첫 통화 첫 turn latency ~2.3s 단축. fail-tolerant — 워밍 실패해도 startup 진행.

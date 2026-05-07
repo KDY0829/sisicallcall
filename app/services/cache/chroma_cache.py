@@ -14,10 +14,15 @@ logger = get_logger(__name__)
 
 class ChromaCacheService(BaseCacheService):
     def __init__(self):
-        import chromadb
-        self._client = chromadb.HttpClient(
-            host=settings.chroma_host, port=settings.chroma_port
-        )
+        self._client = None
+        self._host = settings.chroma_host
+        self._port = settings.chroma_port
+
+    def _get_client(self):
+        if self._client is None:
+            import chromadb
+            self._client = chromadb.HttpClient(host=self._host, port=self._port)
+        return self._client
 
     def _collection_name(self, tenant_id: str) -> str:
         return f"tenant_{tenant_id.replace('-', '')}_cache"
@@ -28,7 +33,7 @@ class ChromaCacheService(BaseCacheService):
         loop = asyncio.get_event_loop()
 
         def _query():
-            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col = self._get_client().get_or_create_collection(self._collection_name(tenant_id))
             result = col.query(
                 query_embeddings=[query_embedding],
                 n_results=1,
@@ -66,7 +71,7 @@ class ChromaCacheService(BaseCacheService):
         entry_id = str(uuid.uuid4())
 
         def _save():
-            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col = self._get_client().get_or_create_collection(self._collection_name(tenant_id))
             col.add(
                 ids=[entry_id],
                 embeddings=[query_embedding],
@@ -87,7 +92,7 @@ class ChromaCacheService(BaseCacheService):
 
         def _clear():
             try:
-                self._client.delete_collection(self._collection_name(tenant_id))
+                self._get_client().delete_collection(self._collection_name(tenant_id))
             except Exception as exc:
                 logger.warning("cache clear failed tenant=%s err=%s", tenant_id, exc)
 

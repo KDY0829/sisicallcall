@@ -9,10 +9,15 @@ logger = get_logger(__name__)
 
 class ChromaRAGService(BaseRAGService):
     def __init__(self):
-        import chromadb
-        self._client = chromadb.HttpClient(
-            host=settings.chroma_host, port=settings.chroma_port
-        )
+        self._client = None
+        self._host = settings.chroma_host
+        self._port = settings.chroma_port
+
+    def _get_client(self):
+        if self._client is None:
+            import chromadb
+            self._client = chromadb.HttpClient(host=self._host, port=self._port)
+        return self._client
 
     def _collection_name(self, tenant_id: str) -> str:
         return f"tenant_{tenant_id.replace('-', '')}_docs"
@@ -26,7 +31,7 @@ class ChromaRAGService(BaseRAGService):
         loop = asyncio.get_event_loop()
 
         def _query():
-            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col = self._get_client().get_or_create_collection(self._collection_name(tenant_id))
             result = col.query(query_embeddings=[query_embedding], n_results=top_k)
             return result["documents"][0] if result["documents"] else []
 
@@ -49,7 +54,7 @@ class ChromaRAGService(BaseRAGService):
         loop = asyncio.get_event_loop()
 
         def _query():
-            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col = self._get_client().get_or_create_collection(self._collection_name(tenant_id))
             kwargs = {
                 "query_embeddings": [query_embedding],
                 "n_results": top_k,
@@ -91,7 +96,7 @@ class ChromaRAGService(BaseRAGService):
         loop = asyncio.get_event_loop()
 
         def _upsert():
-            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col = self._get_client().get_or_create_collection(self._collection_name(tenant_id))
             col.upsert(
                 ids=[doc_id],
                 embeddings=[embedding],
@@ -109,7 +114,7 @@ class ChromaRAGService(BaseRAGService):
         loop = asyncio.get_event_loop()
 
         def _delete():
-            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col = self._get_client().get_or_create_collection(self._collection_name(tenant_id))
             col.delete(ids=[doc_id])
 
         await loop.run_in_executor(None, _delete)
@@ -122,7 +127,7 @@ class ChromaRAGService(BaseRAGService):
         loop = asyncio.get_event_loop()
 
         def _list():
-            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col = self._get_client().get_or_create_collection(self._collection_name(tenant_id))
             result = col.get(include=["documents", "metadatas"])
             ids = result.get("ids") or []
             docs = result.get("documents") or []
@@ -147,7 +152,7 @@ class ChromaRAGService(BaseRAGService):
         loop = asyncio.get_event_loop()
 
         def _delete():
-            col = self._client.get_or_create_collection(self._collection_name(tenant_id))
+            col = self._get_client().get_or_create_collection(self._collection_name(tenant_id))
             col.delete(where={"document_id": {"$eq": document_id}})
 
         await loop.run_in_executor(None, _delete)
