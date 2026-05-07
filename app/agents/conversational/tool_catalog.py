@@ -36,18 +36,18 @@ TOOL_CATALOG: dict[str, dict] = {
     "schedule_callback": {
         "tool": "calendar",
         "oauth_provider": "google_calendar",
-        "description": "통화/방문 일정 예약 (식당 좌석 예약, 진료 예약, 상담 콜백 등 모든 일정 예약 포함)",
+        "description": "예약/방문 일정 등록 (식당 좌석 예약, 진료 예약, 상담 일정 등 모든 일정 예약 포함)",
         "requires_auth": False,
         "parameters": {
             "type": "object",
             "properties": {
                 "preferred_time": {
                     "type": "string",
-                    "description": "사용자 선호 시각 (예: '내일 오후 3시', '2026-05-03 15:00')",
+                    "description": "예약 희망 일시 (예: '내일 오후 3시', '2026-05-03 15:00')",
                 },
                 "callback_reason": {
                     "type": "string",
-                    "description": "콜백 사유",
+                    "description": "예약 사유",
                 },
             },
             "required": ["preferred_time"],

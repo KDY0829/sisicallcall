@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime
 
 from app.agents.conversational.prompts.fallback_phrases import (
@@ -33,10 +34,10 @@ def _today_label() -> str:
 _POLITE_AUTH = "본인 인증이 필요한 작업이에요. 인증 진행해드릴까요?"
 _POLITE_BLOCKED = "본인 인증이 여러 번 실패해 더 이상 진행이 어려워요. 상담원으로 연결해드릴게요."
 _POLITE_MISSING_INFO = "처리에 필요한 정보를 조금 더 알려주시겠어요?"
-_POLITE_DECLINE_BOOKING = "네, 예약은 진행하지 않을게요. 이용해주셔서 감사합니다."
-_POLITE_SMS_DECLINED = "네, 이용해주셔서 감사합니다."
-_POLITE_SMS_SENT = "확인 문자 발송해드렸어요. 이용해주셔서 감사합니다."
-_POLITE_SMS_FAILED = "확인 문자 발송에 문제가 생겼어요. 이용해주셔서 감사합니다."
+_POLITE_DECLINE_BOOKING = "네, 예약은 진행하지 않을게요. 더 필요하신게 있으실까요?"
+_POLITE_SMS_DECLINED = "네, 알겠습니다. 더 필요하신게 있으실까요?"
+_POLITE_SMS_SENT = "확인 문자 발송해드렸어요. 더 필요하신게 있으실까요?"
+_POLITE_SMS_FAILED = "확인 문자 발송에 문제가 생겼어요. 더 필요하신게 있으실까요?"
 
 
 def _polite_no_tools(industry: str) -> str:
@@ -150,10 +151,10 @@ _SELECT_SYSTEM_PROMPT_TEMPLATE = """당신은 매장 전화 상담 AI 의 업무
 - 사용자 요청에 가장 잘 맞는 도구를 선택해 호출하세요. 인자가 부족해도 일단 호출하세요 — 시스템이 부족한 인자나 인증 필요 여부를 처리합니다.
 - 환각 금지 — 사용자가 명시하지 않은 시간/번호/이름을 추측해서 채우지 마세요. 모르면 빈 문자열로 두세요.
 - 시간 인자 처리 (매우 중요):
-  · [재작성된 의도] 에 이미 절대 날짜 (YYYY-MM-DD HH:MM 형식) 가 있으면 그 값을 **글자 그대로** args 에 넣으세요.
-    사용자 발화의 요일 표현 ("이번주 토요일" 등) 과 다르더라도 [재작성된 의도] 의 절대 날짜를 신뢰합니다.
-    날짜를 임의로 다시 계산하지 마세요.
-  · [재작성된 의도] 에 절대 날짜가 없고 사용자 발화에만 상대 표현이 있으면, [현재 날짜] 기준으로 계산해서 절대 날짜로 채우세요.
+  · [재작성된 의도] 앞에 "(날짜: YYYY-MM-DD HH:MM)" 형식 prefix (시간 포함) 가 있으면 그 값을 그대로 preferred_time 에 넣으세요. 임의 재계산 금지.
+  · [재작성된 의도] 앞에 "(날짜: YYYY-MM-DD)" 형식 prefix 만 있고 시간 정보가 없으면 → preferred_time 을 빈 문자열 ("") 로 두세요. 시스템이 사용자에게 시간을 묻습니다. 임의로 시간 채우지 마세요.
+  · prefix 가 없고 사용자 발화에 명확한 시각 ("오후 3시" 등) 이 있으면 [현재 날짜] 기준으로 절대 날짜+시간 으로 채우세요.
+  · prefix 도 없고 발화에 시각 표현 (X시, 오전/오후, 점심, 저녁 등) 도 없으면 preferred_time 을 빈 문자열로 두세요. 날짜만 있는 경우도 시간 부재이므로 빈 문자열로.
 - 도구로 처리할 수 없는 요청 (예약/조회/문자 같은 도구 작업이 아닌 일반 안내) 일 때만 호출 없이 "이 작업은 매장으로 직접 문의 부탁드려요" 라고 답하세요. 따옴표/머릿말 금지."""
 
 _ASK_MISSING_SYSTEM_PROMPT = """당신은 매장 전화 상담 AI 입니다.
@@ -219,7 +220,7 @@ async def ask_for_missing(
 
     user_message = (
         f"[사용자 요청]\n{query}\n\n"
-        f"[처리하려는 작업]\n{action_type}\n\n"
+        f"[처리하려는 작업]\n{spec.get('description', action_type)}\n\n"
         f"[부족한 정보]\n" + "\n".join(f"- {d}" for d in descs)
     )
     try:
@@ -569,6 +570,15 @@ async def task_branch_node(state: CallState) -> dict:
 
     spec = available[action_type]
     print(f"[task_branch] selected={action_type} args={arguments}")
+
+    # 안전망 — schedule_callback preferred_time 형식 검증.
+    # LLM 이 시간 누락된 'YYYY-MM-DD' 만 채워도 빈 값 강제 → ask_missing 발동.
+    # calendar connector 의 silent fallback (자정 00:00) 차단.
+    if action_type == "schedule_callback":
+        pt = arguments.get("preferred_time", "")
+        if pt and not re.fullmatch(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}", pt):
+            print(f"[task_branch] preferred_time 형식 invalid '{pt}' → 빈 값 강제")
+            arguments["preferred_time"] = ""
 
     # required 인자 사전 계산 — auth 게이트의 pending_task 저장 정책에 사용.
     required = (spec.get("parameters") or {}).get("required") or []
