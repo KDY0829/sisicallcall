@@ -14,10 +14,12 @@
     .step.active{border-color:#1976D2;background:#f5faff}
     .step.done{border-color:#4CAF50;background:#e8f5e9}
     .step.fail{border-color:#f44336;background:#ffebee}
+    .step.processing{border-color:#FF9800;background:#fff8e1}
     .step-title{font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
     .badge{font-size:11px;padding:2px 8px;border-radius:12px;background:#e0e0e0;color:#555}
     .badge.ok{background:#c8e6c9;color:#2e7d32}
     .badge.fail{background:#ffcdd2;color:#c62828}
+    .badge.processing{background:#ffe0b2;color:#e65100}
     button{width:100%;padding:13px;font-size:15px;font-weight:600;border:none;border-radius:8px;cursor:pointer;margin-top:8px;transition:.15s}
     .btn-primary{background:#1976D2;color:#fff}
     .btn-primary:disabled{background:#90CAF9;cursor:not-allowed}
@@ -27,39 +29,70 @@
     input[type=file]{display:none}
     img.preview{width:100%;border-radius:8px;margin:8px 0;max-height:280px;object-fit:contain;background:#000}
     #status{text-align:center;font-size:13px;color:#666;padding:8px 0;min-height:20px}
-    .result-text{font-size:14px;line-height:1.6;color:#333;background:#f9f9f9;border-radius:8px;padding:12px;margin:8px 0;max-height:240px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
-    .char-count{font-size:12px;color:#999;text-align:right;margin-top:4px}
     .guide{font-size:13px;color:#555;margin-bottom:8px}
     .tip{font-size:12px;color:#888;background:#f0f4ff;border-radius:6px;padding:8px 10px;margin-top:8px}
+    .done-msg{font-size:15px;color:#2e7d32;font-weight:600;margin-top:12px}
+    .done-sub{font-size:13px;color:#555;margin-top:8px;line-height:1.6}
+    .spinner{display:inline-block;width:18px;height:18px;border:3px solid #FF9800;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}
+    @keyframes spin{to{transform:rotate(360deg)}}
   </style>
 </head>
 <body>
 <div class="card">
-  <h2>📄 문서 텍스트 추출</h2>
+  <h2>📄 문서 업로드</h2>
   <p class="subtitle" id="ocr-id-label"></p>
 
-  <div class="step active" id="step1">
-    <div class="step-title">문서 사진 선택 <span class="badge" id="b1">대기</span></div>
-    <p class="guide">처방전, 신분증, 영수증 등 텍스트가 있는 문서를 촬영하거나 갤러리에서 선택해주세요.</p>
-    <div class="file-row">
-      <label for="cam">📷 카메라</label>
-      <label for="gal">🖼 갤러리</label>
+  <!-- 1. 세션 만료/오류 -->
+  <div id="expired-section" style="display:none">
+    <div class="step fail">
+      <div class="step-title">링크 오류 <span class="badge fail">오류</span></div>
+      <p id="expired-msg" style="font-size:14px;color:#c62828;margin-top:8px;line-height:1.5"></p>
     </div>
-    <input type="file" id="cam" accept="image/*" capture="environment" onchange="previewFile(this)">
-    <input type="file" id="gal" accept="image/*" onchange="previewFile(this)">
-    <img id="preview" class="preview" style="display:none" alt="">
-    <p class="tip">💡 문서 전체가 화면에 들어오도록 정면에서 찍어주세요.</p>
-    <button class="btn-primary" id="btn-upload" onclick="uploadImage()" disabled>텍스트 추출하기</button>
   </div>
 
-  <div class="step" id="step2" style="display:none">
-    <div class="step-title">추출 결과 <span class="badge" id="b2"></span></div>
-    <div class="result-text" id="result-text"></div>
-    <p class="char-count" id="char-count"></p>
-    <p id="result-msg" style="text-align:center;font-size:14px;color:#555;margin-top:8px"></p>
+  <!-- 2. 업로드 UI (세션 유효 시 표시) -->
+  <div id="upload-section" style="display:none">
+    <div class="step active" id="step1">
+      <div class="step-title">문서 사진 선택 <span class="badge" id="b1">대기</span></div>
+      <p class="guide">처방전, 신분증, 영수증 등 텍스트가 있는 문서를 촬영하거나 갤러리에서 선택해주세요.</p>
+      <div class="file-row">
+        <label for="cam">📷 카메라</label>
+        <label for="gal">🖼 갤러리</label>
+      </div>
+      <input type="file" id="cam" accept="image/*" capture="environment" onchange="previewFile(this)">
+      <input type="file" id="gal" accept="image/*" onchange="previewFile(this)">
+      <img id="preview" class="preview" style="display:none" alt="">
+      <p class="tip">💡 문서 전체가 화면에 들어오도록 정면에서 찍어주세요.</p>
+      <button class="btn-primary" id="btn-upload" onclick="uploadImage()" disabled>텍스트 추출하기</button>
+    </div>
   </div>
 
-  <p id="status">사진을 선택해주세요.</p>
+  <!-- 3. 처리 중 -->
+  <div id="processing-section" style="display:none">
+    <div class="step processing">
+      <div class="step-title"><span class="spinner"></span>문서 읽는 중 <span class="badge processing">처리 중</span></div>
+      <p style="font-size:13px;color:#e65100;margin-top:8px">잠시만 기다려주세요. 완료되면 자동으로 안내됩니다.</p>
+    </div>
+  </div>
+
+  <!-- 4. 완료 (텍스트 미표시) -->
+  <div id="done-section" style="display:none">
+    <div class="step done">
+      <div class="step-title">업로드 완료 <span class="badge ok">완료</span></div>
+      <p class="done-msg">✅ 문서를 전달했어요!</p>
+      <p class="done-sub">전화 화면으로 돌아가서<br><strong>"올렸어요"</strong> 라고 말씀해주시면<br>바로 내용을 안내해드릴게요.</p>
+    </div>
+  </div>
+
+  <!-- 5. 실패 -->
+  <div id="failed-section" style="display:none">
+    <div class="step fail">
+      <div class="step-title">인식 실패 <span class="badge fail">실패</span></div>
+      <p style="font-size:14px;color:#c62828;margin-top:8px">문서 인식에 문제가 생겼어요.<br>전화에서 상담원 연결을 요청해주세요.</p>
+    </div>
+  </div>
+
+  <p id="status">세션 확인 중...</p>
 </div>
 
 <script>
@@ -71,23 +104,52 @@ document.getElementById('ocr-id-label').textContent = 'session: ' + ocrId;
 let _selectedFile = null;
 
 function setStatus(msg) { document.getElementById('status').textContent = msg; }
+function showSection(id) {
+  ['expired-section','upload-section','processing-section','done-section','failed-section']
+    .forEach(s => document.getElementById(s).style.display = s === id ? 'block' : 'none');
+}
 
+function showExpired(msg) {
+  document.getElementById('expired-msg').textContent = msg;
+  showSection('expired-section');
+  setStatus('');
+}
+
+// ── 페이지 로드 시 세션 유효성 검증 ──────────────────────────────────
+window.addEventListener('DOMContentLoaded', async () => {
+  if (!ocrId) { showExpired('잘못된 링크입니다.'); return; }
+  try {
+    const r = await fetch('/ocr/' + ocrId + '/status');
+    if (r.status === 404) { showExpired('링크가 만료됐거나 존재하지 않아요.\n전화에서 다시 요청해주세요.'); return; }
+    if (!r.ok) { showExpired('서버 오류가 발생했어요. 잠시 후 다시 시도해주세요.'); return; }
+    const data = await r.json();
+    if (data.status === 'extracted') { showSection('done-section'); setStatus('이미 처리된 문서입니다.'); return; }
+    if (data.status === 'failed')    { showSection('failed-section'); setStatus(''); return; }
+    // pending | extracting — 정상 진입
+    showSection('upload-section');
+    setStatus('사진을 선택해주세요.');
+  } catch(e) {
+    showExpired('서버 연결에 실패했어요.');
+  }
+});
+
+// ── 파일 선택 미리보기 ─────────────────────────────────────────────
 function previewFile(input) {
   const f = input.files && input.files[0];
   if (!f) return;
   _selectedFile = f;
-  const url = URL.createObjectURL(f);
   const img = document.getElementById('preview');
-  img.src = url;
+  img.src = URL.createObjectURL(f);
   img.style.display = 'block';
   document.getElementById('btn-upload').disabled = false;
-  setStatus('업로드 준비 완료. 버튼을 눌러주세요.');
+  document.getElementById('b1').textContent = '선택 완료';
+  setStatus('업로드 버튼을 눌러주세요.');
 }
 
+// ── 업로드 + 폴링 ──────────────────────────────────────────────────
 async function uploadImage() {
   if (!_selectedFile) { setStatus('사진을 먼저 선택해주세요.'); return; }
   document.getElementById('btn-upload').disabled = true;
-  setStatus('텍스트 추출 중...');
 
   const form = new FormData();
   form.append('file', _selectedFile, 'document.jpg');
@@ -95,30 +157,35 @@ async function uploadImage() {
     const r = await fetch('/ocr/' + ocrId + '/extract', {method:'POST', body:form});
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.status);
-    showResult(data);
+    // 202 Accepted — 백그라운드 처리 중, 폴링 시작
+    showSection('processing-section');
+    setStatus('문서를 읽고 있어요...');
+    await pollUntilDone();
   } catch(e) {
     document.getElementById('step1').className = 'step fail';
     document.getElementById('b1').textContent = '실패';
     document.getElementById('b1').className = 'badge fail';
-    setStatus('오류: ' + e.message);
     document.getElementById('btn-upload').disabled = false;
+    showSection('upload-section');
+    setStatus('오류: ' + e.message);
   }
 }
 
-function showResult(data) {
-  document.getElementById('step1').className = 'step done';
-  document.getElementById('b1').textContent = '완료';
-  document.getElementById('b1').className = 'badge ok';
-  const step2 = document.getElementById('step2');
-  step2.style.display = 'block';
-  step2.className = 'step done';
-  document.getElementById('b2').textContent = '추출 완료';
-  document.getElementById('b2').className = 'badge ok';
-  const text = data.extracted_text || '';
-  document.getElementById('result-text').textContent = text || '(인식된 텍스트 없음)';
-  document.getElementById('char-count').textContent = data.char_count + '자 추출됨';
-  document.getElementById('result-msg').textContent = '추출이 완료됐어요. 통화 화면으로 돌아가 알려주시면 안내드릴게요.';
-  setStatus('완료!');
+async function pollUntilDone() {
+  const MAX_TRIES = 30; // 최대 60초 (2초 간격)
+  for (let i = 0; i < MAX_TRIES; i++) {
+    await new Promise(res => setTimeout(res, 2000));
+    try {
+      const r = await fetch('/ocr/' + ocrId + '/status');
+      if (!r.ok) continue;
+      const data = await r.json();
+      if (data.status === 'extracted') { showSection('done-section'); setStatus(''); return; }
+      if (data.status === 'failed')    { showSection('failed-section'); setStatus(''); return; }
+    } catch(_) {}
+  }
+  // 타임아웃
+  showSection('failed-section');
+  setStatus('처리 시간이 초과됐어요.');
 }
 </script>
 </body>
