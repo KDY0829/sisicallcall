@@ -77,3 +77,7 @@ tmp/
 models/
 
 requirements-local.txt
+
+# 임시/작업용 파일
+temp_*.txt
+*.pdf
