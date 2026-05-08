@@ -61,6 +61,19 @@ def _intent_to_response_path(intent: str | None) -> str | None:
     return None
 
 
+async def _warmup_openai_for_incoming() -> None:
+    """incoming POST 시점에 OpenAI connection 워밍 — production idle 후 첫 통화 대응.
+    startup 워밍은 5분 keepalive 만료 시 무효화되므로, 매 통화마다 fire-and-forget 으로
+    재워밍. 첫 LLM 호출 (~12-19초 후) 까지 connection hot 보장.
+    """
+    try:
+        from app.services.llm.gpt4o_mini import GPT4OMiniService
+        await GPT4OMiniService().generate("ping", "ok", max_tokens=5)
+        print("[WARMUP] OpenAI connection warmed for incoming call")
+    except Exception as e:
+        print(f"[WARMUP] OpenAI warmup failed: {e}")
+
+
 @router.post("/incoming")
 async def incoming_call(request: Request):
     form = await request.form()
@@ -71,6 +84,10 @@ async def incoming_call(request: Request):
     # SIP URI / e164 / single digit 모두 처리 — 매칭 실패 시 raw 값 반환됨 (UUID 아님 → echo).
     tenant_id = await resolve_tenant_id(to_field)
     print(f"[INCOMING] to={to_field!r} caller={caller_number!r} call_sid={twilio_call_sid!r} tenant_id={tenant_id!r}")
+
+    # OpenAI connection 워밍 fire-and-forget — 첫 LLM 호출 (~12-19s 후) 까지 hot 보장.
+    if settings.warmup_enabled:
+        asyncio.create_task(_warmup_openai_for_incoming())
 
     host = request.headers.get("host", "")
     ws_url = f"wss://{host}/call/ws"
