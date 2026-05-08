@@ -1,4 +1,4 @@
-"""Dev server launcher — uvicorn 실행 + 콘솔/파일 동시 로깅.
+"""Dev server launcher - uvicorn 실행 + 콘솔/파일 동시 로깅.
 
 - logs/{YYYY-MM-DD}/stdout_{HHMMSS}.log 자동 생성
 - print/logger/uvicorn 출력 통째 캡처 (stderr → stdout 통합)
@@ -21,6 +21,10 @@ from pathlib import Path
 
 
 def main() -> int:
+    # Windows cp949 터미널에서 유니코드 문자(em dash 등) 출력 오류 방지
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     # 프로젝트 루트로 이동 (스크립트 위치 기준)
     repo_root = Path(__file__).resolve().parent.parent
     os.chdir(repo_root)
@@ -31,15 +35,15 @@ def main() -> int:
     log_path = log_dir / f"stdout_{now.strftime('%H%M%S')}.log"
 
     print(f"[run_dev] log file: {log_path}")
-    print(f"[run_dev] starting server — Ctrl+C to stop")
+    print(f"[run_dev] starting server - Ctrl+C to stop")
     print(flush=True)
 
-    # uvicorn — venv python 직접 호출 (현재 인터프리터)
+    # uvicorn - venv python 직접 호출 (현재 인터프리터)
     cmd = [sys.executable, "-m", "uvicorn", "app.main:app", "--reload"]
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,        # stderr → stdout 통합 (NativeCommandError 우회)
+        stderr=subprocess.STDOUT,        # stderr -> stdout 통합 (NativeCommandError 우회)
         bufsize=1,
         text=True,
         encoding="utf-8",

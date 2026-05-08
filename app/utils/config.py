@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     auth_enable_test_register: bool = False
     auth_web_base_url: str = "http://localhost:3000"
 
+    ocr_session_ttl_sec: int = 600
+    ocr_engine: str = "tesseract"
+    google_vision_api_key: str = ""
+
     # FAQ 시맨틱 캐시 (faq_branch 전용)
     # ChromaDB L2 squared distance (BGE-M3 normalized, L2sq = 2(1-cos_sim)).
     # 0.04 (cos_sim ≥ 0.98) — 진단 결과 (8 paraphrase + 8 unrelated) 에서

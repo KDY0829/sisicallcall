@@ -119,6 +119,32 @@ class RedisSessionService:
             ex=_TTL_SECONDS,
         )
 
+    async def set_ocr_id(self, call_id: str, ocr_id: str) -> None:
+        """ocr_branch 가 SMS 발송 후 통화 세션에 ocr_id 기록 — 재진입 시 폴링용."""
+        view = await self.load(call_id)
+        view["ocr_id"] = ocr_id
+        await self._client.set(
+            self._key(call_id),
+            json.dumps(view, ensure_ascii=False),
+            ex=_TTL_SECONDS,
+        )
+
+    async def get_ocr_id(self, call_id: str) -> str | None:
+        view = await self.load(call_id)
+        return view.get("ocr_id")
+
+    async def clear_ocr_id(self, call_id: str) -> None:
+        """ocr 결과 처리 후 정리 — 새 ocr 사이클을 위해 호출."""
+        view = await self.load(call_id)
+        if "ocr_id" not in view:
+            return
+        del view["ocr_id"]
+        await self._client.set(
+            self._key(call_id),
+            json.dumps(view, ensure_ascii=False),
+            ex=_TTL_SECONDS,
+        )
+
     # ── tenant 단위 캐시 (PDF 인덱싱 산출물) ─────────────────────────
 
     def _key_rag_categories(self, tenant_id: str) -> str:

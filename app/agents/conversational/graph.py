@@ -9,6 +9,7 @@ from app.agents.conversational.nodes.faq_branch_node.faq_branch_node import faq_
 from app.agents.conversational.nodes.task_branch_node.task_branch_node import task_branch_node
 from app.agents.conversational.nodes.auth_branch_node.auth_branch_node import auth_branch_node
 from app.agents.conversational.nodes.vision_branch_node.vision_branch_node import vision_branch_node
+from app.agents.conversational.nodes.ocr_branch_node.ocr_branch_node import ocr_branch_node
 from app.agents.conversational.nodes.escalation_branch_node.escalation_branch_node import escalation_branch_node
 from app.agents.conversational.nodes.clarify_branch_node.clarify_branch_node import clarify_branch_node
 from app.agents.conversational.nodes.repeat_branch_node.repeat_branch_node import repeat_branch_node
@@ -45,6 +46,7 @@ def build_graph():
     g.add_node("task", _timed("task", task_branch_node))
     g.add_node("auth", _timed("auth", auth_branch_node))
     g.add_node("vision", _timed("vision", vision_branch_node))
+    g.add_node("ocr", _timed("ocr", ocr_branch_node))
     g.add_node("escalation", _timed("escalation", escalation_branch_node))
     g.add_node("clarify", _timed("clarify", clarify_branch_node))
     g.add_node("repeat", _timed("repeat", repeat_branch_node))
@@ -70,6 +72,7 @@ def build_graph():
             "task": "task",
             "auth": "auth",
             "vision": "vision",
+            "ocr": "ocr",
             "escalation": "escalation",
             "repeat": "repeat",
         },
@@ -79,6 +82,7 @@ def build_graph():
     g.add_edge("task", END)
     g.add_edge("auth", END)
     g.add_edge("vision", END)
+    g.add_edge("ocr", END)
     g.add_edge("escalation", END)
     g.add_edge("clarify", END)
     g.add_edge("repeat", END)
