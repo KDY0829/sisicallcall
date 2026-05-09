@@ -117,6 +117,16 @@ function showExpired(msg) {
 
 // ── 페이지 로드 시 세션 유효성 검증 ──────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
+  // 데모 모드: ?demo=upload|processing|done|failed|expired
+  const demo = new URLSearchParams(location.search).get('demo');
+  if (demo) {
+    if (demo === 'upload')     { showSection('upload-section');     setStatus('사진을 선택해주세요.'); return; }
+    if (demo === 'processing') { showSection('processing-section'); setStatus('문서를 읽고 있어요...'); return; }
+    if (demo === 'done')       { showSection('done-section');       setStatus(''); return; }
+    if (demo === 'failed')     { showSection('failed-section');     setStatus(''); return; }
+    if (demo === 'expired')    { showExpired('링크가 만료됐거나 존재하지 않아요.\n전화에서 다시 요청해주세요.'); return; }
+  }
+
   if (!ocrId) { showExpired('잘못된 링크입니다.'); return; }
   try {
     const r = await fetch('/ocr/' + ocrId + '/status');
