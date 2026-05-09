@@ -156,7 +156,6 @@ async def get_auth_status(auth_id: str):
         auth_id=auth_id,
         status=session.get("status", "unknown"),
         liveness_passed=session.get("liveness_passed") == "true",
-        ocr_passed=session.get("ocr_passed") == "true",
         face_verified=session.get("face_verified") == "true",
         created_at=session.get("created_at"),
     )

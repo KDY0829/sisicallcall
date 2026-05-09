@@ -3,13 +3,10 @@
 채널: auth:events:{auth_id}
 메시지 형식 (JSON): {"event_type": str, "auth_id": str, "payload": dict}
 
-이벤트 타입:
-  verified              OCR + 얼굴 둘 다 통과 → pending_task 자동 재실행
-  blocked               여러 번 실패 차단 → 상담원 연결 안내
-  face_failed           얼굴 인증 단일 실패 (재시도 가능) → 재시도 안내
-  ocr_failed            OCR 매칭 실패 (재시도 가능) → 재촬영 안내
-  face_verified_partial 얼굴만 통과 (OCR 대기) — Phase 4 보류
-  ocr_passed_partial    OCR 만 통과 (얼굴 대기) — Phase 4 보류
+이벤트 타입 (1단계 face 인증):
+  verified     얼굴 인증 통과 → pending_task 자동 재실행
+  blocked      여러 번 실패 차단 → 상담원 연결 안내
+  face_failed  얼굴 인증 단일 실패 (재시도 가능) → 재시도 안내
 
 publish 는 fire-and-forget. Redis publish 실패해도 통화는 진행.
 listener 가 없으면 메시지는 silently drop.
