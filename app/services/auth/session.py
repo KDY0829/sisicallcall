@@ -37,6 +37,7 @@ class AuthSessionService:
             "call_id": call_id,
             "status": "pending",
             "liveness_passed": "true",  # liveness 단계 미구현 — 항상 통과
+            "ocr_passed": "false",
             "face_verified": "false",
             "face_attempts": "0",
             "created_at": now,
@@ -62,10 +63,30 @@ class AuthSessionService:
         return await self._redis.hincrby(_key(auth_id), "face_attempts", 1)
 
     async def set_face_verified(self, auth_id: str) -> None:
+        # OCR 도 통과해야 verified — 한쪽만 통과면 face_verified 로 stuck.
+        session = await self.get_session(auth_id)
+        if not session:
+            return
+        new_status = "verified" if session.get("ocr_passed") == "true" else "face_verified"
         await self._redis.hset(_key(auth_id), mapping={
             "face_verified": "true",
-            "status": "verified",
+            "status": new_status,
         })
+
+    async def set_ocr_passed(self, auth_id: str) -> None:
+        # face 도 통과해야 verified — 한쪽만 통과면 ocr_passed 로 stuck.
+        session = await self.get_session(auth_id)
+        if not session:
+            return
+        new_status = "verified" if session.get("face_verified") == "true" else "ocr_passed"
+        await self._redis.hset(_key(auth_id), mapping={
+            "ocr_passed": "true",
+            "status": new_status,
+        })
+
+    async def update_customer_ref(self, auth_id: str, customer_ref: str) -> None:
+        # OCR 매칭으로 확인된 phone 을 customer_ref 로 갱신 — face 매칭 시 사용.
+        await self._redis.hset(_key(auth_id), "customer_ref", customer_ref)
 
     async def set_blocked(self, auth_id: str) -> None:
         await self._redis.hset(_key(auth_id), "status", "blocked")

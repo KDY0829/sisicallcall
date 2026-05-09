@@ -11,7 +11,7 @@ from app.services.auth.session import AuthSessionService
 from app.services.mcp.client import mcp_client
 from app.services.session.redis_session import RedisSessionService
 from app.services.sms import get_sms_service
-from app.utils.config import settings
+from app.utils.auth_sms import build_ocr_auth_sms
 
 _auth_session_svc = AuthSessionService()
 _call_session_svc = RedisSessionService()
@@ -20,9 +20,19 @@ _sms_svc = get_sms_service()
 _POLITE_SMS_FAILED = "인증 링크 발송에 문제가 생겼어요. 잠시 후 다시 시도해주세요."
 _POLITE_SMS_SENT = (
     "본인 인증을 위해 휴대폰으로 인증 링크를 보내드렸어요. "
-    "링크를 열어 인증을 완료해주세요."
+    "신분증 촬영 후 얼굴 인증까지 마쳐주세요."
 )
-_POLITE_IN_PROGRESS = "본인 인증을 진행 중이에요. 휴대폰에서 인증을 완료해주세요."
+_POLITE_IN_PROGRESS = (
+    "아직 신분증과 얼굴 인증이 진행되지 않았어요. SMS 링크를 확인해주세요."
+)
+_POLITE_NEED_FACE = (
+    "신분증은 확인했어요. 얼굴 인증이 아직 진행되지 않았어요. "
+    "SMS 페이지에서 얼굴 인증을 마쳐주세요."
+)
+_POLITE_NEED_OCR = (
+    "얼굴 인증은 확인했어요. 신분증 인증이 아직 진행되지 않았어요. "
+    "SMS 페이지에서 신분증 촬영을 마쳐주세요."
+)
 _POLITE_VERIFIED = "인증이 완료됐어요. 어떤 도움이 필요하신가요?"
 _POLITE_BLOCKED = "인증이 여러 번 실패해 차단됐어요. 상담원으로 연결해드릴게요."
 
@@ -45,8 +55,8 @@ async def _create_new_auth(call_id: str, tenant_id: str, customer_phone: str) ->
     )
     print(f"[auth_branch] 세션 생성 auth_id={auth_id}")
 
-    auth_url = f"{settings.auth_web_base_url}/auth/{auth_id}"
-    sms_body = f"[시시콜콜] 본인인증을 위해 아래 링크를 열어주세요.\n{auth_url}"
+    # OCR 페이지로 시작 — 페이지 안에 face navigate 링크 있어 한 번 SMS 로 두 단계 커버.
+    sms_body = build_ocr_auth_sms(auth_id)
     sent = await _sms_svc.send_sms(to=customer_phone, body=sms_body)
     print(f"[auth_branch] SMS 발송 sent={sent} to={customer_phone}")
 
@@ -139,7 +149,13 @@ async def auth_branch_node(state: CallState) -> dict:
             return {"response_text": _POLITE_VERIFIED}
         if status == "blocked":
             return {"response_text": _POLITE_BLOCKED}
-        # pending / liveness_pending / liveness_passed / 그 외 → 진행 중 안내
+        # 부분 통과 — 어느 단계가 missing 인지 명시 응답.
+        ocr_passed = auth_session.get("ocr_passed") == "true"
+        face_verified = auth_session.get("face_verified") == "true"
+        if ocr_passed and not face_verified:
+            return {"response_text": _POLITE_NEED_FACE}
+        if face_verified and not ocr_passed:
+            return {"response_text": _POLITE_NEED_OCR}
         return {"response_text": _POLITE_IN_PROGRESS}
 
     # ② 신규 진입 — D-A 와 동일

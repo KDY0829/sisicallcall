@@ -38,18 +38,32 @@ logger = get_logger(__name__)
 
 # ── Finance tenant mock 회원 (시연용) ─────────────────────────────────────────
 # key = phone (= face_embeddings.customer_ref 와 동일 패턴)
+# rrn = 주민번호 dummy (실 데이터 X — OCR 매칭 시연용 placeholder).
+#       시연 신분증의 실제 RRN 으로 교체해서 사용.
 _FINANCE_MEMBERS: dict[str, dict] = {
     "01047722480": {  # 희원 (실통화 SMS 수신 번호)
         "name": "이희원",
+        "rrn": "990101-1234567",
         "card_number_masked": "신한카드 *5678",
         "card_status": "normal",
     },
     "01012345678": {  # 더미 (대조용)
         "name": "김철수",
+        "rrn": "850315-1234567",
         "card_number_masked": "국민카드 *1234",
         "card_status": "normal",
     },
 }
+
+
+def find_member_by_ocr(name: str, rrn: str) -> tuple[str, dict] | None:
+    """OCR 결과 (name + rrn) 로 회원 찾음. 둘 다 일치해야 매칭."""
+    if not name or not rrn:
+        return None
+    for phone, member in _FINANCE_MEMBERS.items():
+        if member["name"] == name and member["rrn"] == rrn:
+            return phone, member
+    return None
 
 
 class CompanyDBConnector(BaseMCPConnector):

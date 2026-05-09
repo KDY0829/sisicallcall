@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import APP_DESCRIPTION, APP_TITLE, APP_VERSION
 from app.core.middleware import RequestLoggingMiddleware
-from app.api.v1 import admin_auth, auth, call, call_history, dashboard, post_call, summary, tenant, vision
+from app.api.v1 import admin_auth, auth, call, call_history, dashboard, ocr, ocr_auth, post_call, summary, tenant, vision
 from app.api.v1.oauth import router as oauth_router
 from app.services.embedding import get_embedder
 from app.utils.config import settings
@@ -119,6 +119,8 @@ app.include_router(dashboard.router, prefix="/dashboard",  tags=["dashboard"])
 app.include_router(admin_auth.router, prefix="/auth",      tags=["admin-auth"])
 app.include_router(auth.router,      prefix="/auth",       tags=["auth"])
 app.include_router(vision.router,    prefix="/vision",     tags=["vision"])
+app.include_router(ocr.router,       prefix="/ocr",        tags=["ocr"])
+app.include_router(ocr_auth.router,  prefix="/ocr-auth",   tags=["ocr-auth"])
 app.include_router(oauth_router,     prefix="/api/v1/oauth", tags=["oauth"])
 
 

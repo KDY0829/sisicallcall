@@ -31,7 +31,10 @@ def _today_label() -> str:
     return f"{now.strftime('%Y-%m-%d')} ({_KOREAN_WEEKDAYS[now.weekday()]})"
 
 
-_POLITE_AUTH = "본인 인증이 필요한 작업이에요. 인증 진행해드릴까요?"
+_POLITE_AUTH = (
+    "본인 인증이 필요한 작업이에요. 신분증과 얼굴 인증 둘 다 진행해야 합니다. "
+    "진행해드릴까요?"
+)
 _POLITE_BLOCKED = "본인 인증이 여러 번 실패해 더 이상 진행이 어려워요. 상담원으로 연결해드릴게요."
 _POLITE_MISSING_INFO = "처리에 필요한 정보를 조금 더 알려주시겠어요?"
 _POLITE_DECLINE_BOOKING = "네, 예약은 진행하지 않을게요. 더 필요하신게 있으실까요?"
