@@ -84,8 +84,8 @@ async def _resume_pending_task(
     user_text = pending.get("user_text", "")
     print(f"[auth_branch] pending_task 자동 재실행 action={action_type} args={arguments}")
 
-    # spec 재조회 — 매장 도구 disconnect 같은 edge case 안전망.
-    available = await get_available_actions(tenant_id)
+    # spec 재조회 — 매장 도구 disconnect / industry 화이트리스트 변경 같은 edge case 안전망.
+    available = await get_available_actions(tenant_id, tenant_industry)
     spec = available.get(action_type)
     if spec is None:
         print(f"[auth_branch] pending action={action_type} 카탈로그 없음 → polite_verified")
@@ -95,7 +95,7 @@ async def _resume_pending_task(
     missing = [k for k in required if not arguments.get(k)]
     if missing:
         print(f"[auth_branch] resume args 부족 missing={missing} → ask_for_missing")
-        text = await ask_for_missing(user_text, action_type, spec, missing)
+        text = await ask_for_missing(user_text, action_type, spec, missing, tenant_industry)
         return {"response_text": text}
 
     try:

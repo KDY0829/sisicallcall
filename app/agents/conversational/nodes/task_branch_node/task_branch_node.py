@@ -6,6 +6,11 @@ from app.agents.conversational.prompts.fallback_phrases import (
     get_contact_channel,
     get_inquiry_phrase,
 )
+from app.agents.conversational.prompts.task import (
+    build_ask_missing_prompt,
+    build_humanize_prompt,
+    build_select_prompt,
+)
 from app.agents.conversational.state import CallState
 from app.agents.conversational.tool_catalog import (
     get_available_actions,
@@ -173,45 +178,6 @@ def _format_check_response(result_data: dict) -> str:
         return f"{req_kor}{req_marker} 다른 예약이 있어요. 다른 시간 알려주실 수 있을까요?"
     return _POLITE_MISSING_INFO
 
-_SELECT_SYSTEM_PROMPT_TEMPLATE = """당신은 매장 전화 상담 AI 의 업무 처리 도구 선택기입니다.
-
-[현재 날짜] {today}
-
-[지침]
-- 사용자 요청에 가장 잘 맞는 도구를 선택해 호출하세요. 인자가 부족해도 일단 호출하세요 — 시스템이 부족한 인자나 인증 필요 여부를 처리합니다.
-- 환각 금지 — 사용자가 명시하지 않은 시간/번호/이름을 추측해서 채우지 마세요. 모르면 빈 문자열로 두세요.
-- 시간 인자 처리 (매우 중요):
-  · [재작성된 의도] 앞에 "(날짜: YYYY-MM-DD HH:MM)" 형식 prefix (시간 포함) 가 있으면 그 값을 그대로 preferred_time 에 넣으세요. 임의 재계산 금지.
-  · [재작성된 의도] 앞에 "(날짜: YYYY-MM-DD)" 형식 prefix 만 있고 시간 정보가 없으면 → preferred_time 을 빈 문자열 ("") 로 두세요. 시스템이 사용자에게 시간을 묻습니다. 임의로 시간 채우지 마세요.
-  · prefix 가 없고 사용자 발화에 명확한 시각 ("오후 3시" 등) 이 있으면 [현재 날짜] 기준으로 절대 날짜+시간 으로 채우세요.
-  · prefix 도 없고 발화에 시각 표현 (X시, 오전/오후, 점심, 저녁 등) 도 없으면 preferred_time 을 빈 문자열로 두세요. 날짜만 있는 경우도 시간 부재이므로 빈 문자열로.
-- 도구로 처리할 수 없는 요청 (예약/조회/문자 같은 도구 작업이 아닌 일반 안내) 일 때만 호출 없이 "이 작업은 매장으로 직접 문의 부탁드려요" 라고 답하세요. 따옴표/머릿말 금지."""
-
-_ASK_MISSING_SYSTEM_PROMPT = """당신은 매장 전화 상담 AI 입니다.
-사용자가 요청한 작업에 필요한 정보가 일부 부족합니다.
-부족한 정보의 의미를 보고, 자연스러운 한국어 한 문장으로 사용자에게 물어보세요.
-
-[지침]
-- 친절한 어조 ("혹시", "죄송하지만" 같은 부드러운 표현)
-- 한 문장만. 따옴표/머릿말 금지."""
-
-_HUMANIZE_SYSTEM_PROMPT_TEMPLATE = """당신은 매장 전화 상담 AI 입니다. MCP 도구 호출 결과를 사용자에게 친절한 음성 안내로 전달하세요.
-
-[현재 날짜] {today}
-
-[지침]
-- 한두 문장으로 자연스럽게.
-- 결과 데이터에 있는 사실만 사용. 없는 정보 추측 금지.
-- "도구", "API" 같은 메타 표현 금지. 매장 직원처럼 응답.
-- 음성 출력이므로 URL/링크/마크다운 ([텍스트](URL))/이메일/event_id 등 내부 식별자 절대 출력 금지.
-- 결과 데이터의 날짜는 사실로 받아들이세요. 결과 데이터의 날짜와 사용자 발화의 요일이 다르면 결과 데이터를 신뢰하고, 그 날짜의 실제 요일을 [현재 날짜] 기준으로 직접 계산하세요.
-- 결과 데이터의 날짜가 'YYYY-MM-DD HH:MM' 형식이면 음성 친화적 한국어 ("5월 8일 금요일 오후 3시") 로 변환해서 안내하세요.
-- [코드 계산된 한국어 시각] 섹션이 있으면 그 표현 한 번만 그대로 안내에 사용하세요. 자체 요일/시각 계산 절대 금지. "내일", "다음 주 X요일", "2026년" 같은 추가 시간 표현/연도 절대 추가하지 말 것 — 코드 결과 한 표현만 깔끔하게 음성으로 자연스럽게.
-- 결과 데이터에 'action_label_kr' 같은 한국어 동사 라벨이 있으면 그 표현을 그대로 사용. 사용자 발화에 다른 단어 (예: '취소', '없애줘') 가 있어도 결과 데이터 라벨 우선.
-- 결과 데이터에 'name' 필드가 있으면 응답을 'X 고객님,' 으로 시작하세요 (예: '이희원 고객님, 신한카드 *5678 정지 처리가 완료되었습니다.'). 인증이 완료된 회원 작업은 이름을 부르며 시작하는 것이 자연스러움.
-- 출력은 응답 텍스트만. 따옴표/머릿말 금지."""
-
-
 def _format_user_message(rewritten: str, user_text: str, history: list) -> str:
     """LLM Function Calling 입력 포맷.
 
@@ -232,7 +198,11 @@ def _format_user_message(rewritten: str, user_text: str, history: list) -> str:
 
 
 async def ask_for_missing(
-    query: str, action_type: str, spec: dict, missing: list[str]
+    query: str,
+    action_type: str,
+    spec: dict,
+    missing: list[str],
+    tenant_industry: str = "",
 ) -> str:
     """누락된 required 인자에 대해 자연스러운 역질문 생성.
 
@@ -257,7 +227,7 @@ async def ask_for_missing(
     )
     try:
         text = await _llm.generate(
-            system_prompt=_ASK_MISSING_SYSTEM_PROMPT,
+            system_prompt=build_ask_missing_prompt(tenant_industry),
             user_message=user_message,
             temperature=0.2,
             max_tokens=80,
@@ -312,7 +282,7 @@ async def humanize_tool_result(
     )
     try:
         text = await _llm.generate(
-            system_prompt=_HUMANIZE_SYSTEM_PROMPT_TEMPLATE.format(today=_today_label()),
+            system_prompt=build_humanize_prompt(tenant_industry, _today_label()),
             user_message=user_message,
             temperature=0.2,
             max_tokens=200,
@@ -510,9 +480,9 @@ async def task_branch_node(state: CallState) -> dict:
             await _call_session_svc.clear_pending_task(call_id)
             print(f"[task_branch] availability_confirmed 다른 의도 → pending clear")
 
-    # 1. 매장 가용 도구
-    available = await get_available_actions(tenant_id)
-    print(f"[task_branch] tenant={tenant_id} available={list(available.keys())}")
+    # 1. 매장 가용 도구 — OAuth + industry 화이트리스트 둘 다 통과한 것만 노출
+    available = await get_available_actions(tenant_id, tenant_industry)
+    print(f"[task_branch] tenant={tenant_id} industry={tenant_industry} available={list(available.keys())}")
 
     if not available:
         return {"response_text": _polite_no_tools(tenant_industry)}
@@ -523,12 +493,12 @@ async def task_branch_node(state: CallState) -> dict:
 
     try:
         result = await _llm.generate_with_tools(
-            system_prompt=_SELECT_SYSTEM_PROMPT_TEMPLATE.format(today=_today_label()),
+            system_prompt=build_select_prompt(tenant_industry, _today_label()),
             user_message=user_message,
             tools=tools,
             temperature=0.1,
             max_tokens=300,
-            tool_choice="required",  # LLM 이 인자 부족해도 무조건 tool_call → 게이트가 처리
+            tool_choice="auto",  # LLM 이 도구 부적합 판단 시 호출 안 하고 polite refuse 가능
         )
     except Exception as exc:
         print(f"[task_branch] LLM 실패: {exc}")
@@ -603,7 +573,7 @@ async def task_branch_node(state: CallState) -> dict:
     # 4. required 인자 사후 검증 (LLM 환각/생략 안전망)
     if missing:
         print(f"[task_branch] required 부족 missing={missing}")
-        text = await ask_for_missing(user_text, action_type, spec, missing)
+        text = await ask_for_missing(user_text, action_type, spec, missing, tenant_industry)
         return {"response_text": text}
 
     # 5a. schedule_callback 강제 2단계 — check_availability 먼저, pending_task 저장 후 동의 요청.
