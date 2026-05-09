@@ -7,6 +7,7 @@ from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from app.schemas.auth import AuthInitiateRequest, AuthInitiateResponse, AuthStatusResponse
+from app.services.auth.events import publish_auth_event
 from app.services.auth.session import AuthSessionService
 from app.services.mcp.connectors.company_db_connector import find_member_by_ocr
 from app.services.ocr.id_card_ocr_service import get_id_card_ocr_service
@@ -117,6 +118,7 @@ async def capture_id_card(
         match = find_member_by_ocr(name, rrn)
         if match is None:
             logger.info("OCR 회원 미발견 auth_id=%s name=%r rrn=%r", auth_id, name, rrn)
+            await publish_auth_event(auth_id, "ocr_failed", {"reason": "member_not_found"})
             return {**result, "matched": False, "reason": "member_not_found"}
         phone, _member = match
         await _session_svc.update_customer_ref(auth_id, phone)
