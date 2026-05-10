@@ -1,80 +1,117 @@
+"""Post-call 2-에이전트 그래프.
+
+  load_context
+    → analysis_planner_agent          (Agent 1: 분석 + 액션 후보 propose + auto inject)
+    → save_intermediate                (분석 결과 무조건 저장 — 대시보드 보장)
+    → escalation_immediate? END
+    → reviewer_agent                   (Agent 2: ReAct 루프 검증, auto_injected 우회)
+        ├ pass / correctable          → action_executor → save_final → END
+        │                               (auto + LLM-approved 모두 실행)
+        ├ fail (retry < MAX)          → increment_analysis_retry → analysis_planner_agent
+        │                               (review_feedback 누적 + 분석 재실행)
+        └ fail (retry ≥ MAX)          → human_queue → auto_action_executor → save_final → END
+                                        (LLM-proposed 차단, auto 만 실행 — 회사 DB 기록 보장)
+
+분석/요약은 reviewer 통과 여부와 무관하게 save_intermediate 단계에서 저장된다 —
+reviewer 가 실패하더라도 call_summaries / voc_analyses 는 보장된다 (ON CONFLICT
+upsert 이므로 retry 시 중복 INSERT 발생 안 함).
+
+자동 주입 액션 (Notion 회사 DB 기록) 은 reviewer 우회. retry 사이클 동안 매번
+재주입되지만 idempotency_token 으로 첫 시도 후 executor 가 skip — 통화당 1건 보장.
+
+외부 MCP 액션 (Slack/Jira/Calendar 등) 은 reviewer 통과 시에만 실행된다.
+
+retry 가드:
+  - MAX_ANALYSIS_RETRIES = 2 (총 3회 = 최초 + 재시도 2회)
+  - retry 한도 초과 시 human_queue → auto_action_executor (auto 만 발송)
+  - retry 시 LLM 비용 증가 — telemetry 에 retry_count 기록
+"""
 from __future__ import annotations
+
 from langgraph.graph import StateGraph, END
+
 from app.agents.post_call.state import PostCallAgentState
-from app.agents.post_call.nodes.load_context_node import load_context_node
-from app.agents.post_call.nodes.post_call_analysis_node import post_call_analysis_node
-from app.agents.post_call.nodes.review_node import review_node
-from app.agents.post_call.nodes.apply_review_corrections_node import apply_review_corrections_node
-from app.agents.post_call.nodes.review_control_node import (
-    increment_review_retry_node,
-    mark_human_review_required_node,
+from app.agents.post_call.nodes.action_executor_node import action_executor_node
+from app.agents.post_call.nodes.analysis_planner_agent_node import analysis_planner_agent_node
+from app.agents.post_call.nodes.auto_action_executor_node import auto_action_executor_node
+from app.agents.post_call.nodes.human_queue_node import human_queue_node
+from app.agents.post_call.nodes.increment_analysis_retry_node import (
+    increment_analysis_retry_node,
 )
-from app.agents.post_call.nodes.action_planner_node import action_planner_node
-from app.agents.post_call.nodes.action_router_node import action_router_node
-from app.agents.post_call.nodes.save_result_node import save_result_node
+from app.agents.post_call.nodes.load_context_node import load_context_node
+from app.agents.post_call.nodes.reviewer_agent_node import reviewer_agent_node
+from app.agents.post_call.nodes.save_result_node import (
+    save_final_node,
+    save_intermediate_node,
+)
 
 
-def _route_after_analysis(state: PostCallAgentState) -> str:
-    # escalation_immediate: 통합 분석만 실행하고 MCP action 없이 저장
+# 분석 재시도 한도 — env 로 노출 안 함 (안전 마진).
+MAX_ANALYSIS_RETRIES = 2
+
+
+def _route_after_intermediate(state: PostCallAgentState) -> str:
+    # escalation_immediate: reviewer/액션 스킵 → 분석만 저장하고 종료.
     if state["trigger"] == "escalation_immediate":
-        return "save_result"
-    return "review_step"
+        return "skip_review"
+    # 분석 자체가 실패해서 human_review_required 가 이미 True 면 reviewer 우회.
+    if state.get("human_review_required"):  # type: ignore[call-overload]
+        return "skip_review"
+    return "review"
 
 
 def _route_after_review(state: PostCallAgentState) -> str:
-    verdict = (
-        state.get("review_verdict")  # type: ignore[call-overload]
-        or (state.get("review_result") or {}).get("verdict")  # type: ignore[call-overload]
-        or "fail"
-    )
-    retry_count = int(state.get("review_retry_count") or 0)  # type: ignore[call-overload]
-
-    if verdict == "pass":
-        return "action_planner"
-    if verdict == "correctable":
-        return "apply_review_corrections_step"
-    if verdict == "retry" and retry_count < 1:
-        return "increment_review_retry_step"
-    return "mark_human_review_required_step"
+    verdict = state.get("review_verdict") or "fail"  # type: ignore[call-overload]
+    if verdict in ("pass", "correctable"):
+        return "execute"
+    # verdict == "fail"
+    retry_count = int(state.get("analysis_retry_count") or 0)  # type: ignore[call-overload]
+    if retry_count < MAX_ANALYSIS_RETRIES:
+        return "retry_analysis"
+    return "human_queue"
 
 
 def build_post_call_graph():
     g: StateGraph = StateGraph(PostCallAgentState)
 
-    # 노드명은 PostCallAgentState 키와 동명이면 LangGraph add_node 가 raise —
-    # 그래서 state key 와 겹치는 이름에는 _step 접미어 사용.
     g.add_node("load_context", load_context_node)
-    g.add_node("post_call_analysis_step", post_call_analysis_node)
-    g.add_node("review_step", review_node)
-    g.add_node("apply_review_corrections_step", apply_review_corrections_node)
-    g.add_node("increment_review_retry_step", increment_review_retry_node)
-    g.add_node("mark_human_review_required_step", mark_human_review_required_node)
-    g.add_node("action_planner", action_planner_node)
-    g.add_node("action_router", action_router_node)
-    g.add_node("save_result", save_result_node)
+    g.add_node("analysis_planner_agent", analysis_planner_agent_node)
+    g.add_node("save_intermediate", save_intermediate_node)
+    g.add_node("reviewer_agent", reviewer_agent_node)
+    g.add_node("increment_analysis_retry", increment_analysis_retry_node)
+    g.add_node("action_executor", action_executor_node)
+    g.add_node("human_queue", human_queue_node)
+    g.add_node("auto_action_executor", auto_action_executor_node)
+    g.add_node("save_final", save_final_node)
 
     g.set_entry_point("load_context")
-    g.add_edge("load_context", "post_call_analysis_step")
+    g.add_edge("load_context", "analysis_planner_agent")
+    g.add_edge("analysis_planner_agent", "save_intermediate")
+
     g.add_conditional_edges(
-        "post_call_analysis_step",
-        _route_after_analysis,
-        {"review_step": "review_step", "save_result": "save_result"},
-    )
-    g.add_conditional_edges(
-        "review_step",
-        _route_after_review,
+        "save_intermediate",
+        _route_after_intermediate,
         {
-            "action_planner": "action_planner",
-            "apply_review_corrections_step": "apply_review_corrections_step",
-            "increment_review_retry_step": "increment_review_retry_step",
-            "mark_human_review_required_step": "mark_human_review_required_step",
+            "review": "reviewer_agent",
+            "skip_review": END,
         },
     )
-    g.add_edge("increment_review_retry_step", "post_call_analysis_step")
-    g.add_edge("apply_review_corrections_step", "action_planner")
-    g.add_edge("action_planner", "action_router")
-    g.add_edge("action_router", "save_result")
-    g.add_edge("mark_human_review_required_step", "save_result")
-    g.add_edge("save_result", END)
+    g.add_conditional_edges(
+        "reviewer_agent",
+        _route_after_review,
+        {
+            "execute": "action_executor",
+            "retry_analysis": "increment_analysis_retry",
+            "human_queue": "human_queue",
+        },
+    )
+    # retry loop: increment → planner → save_intermediate → reviewer (다시)
+    g.add_edge("increment_analysis_retry", "analysis_planner_agent")
+
+    g.add_edge("action_executor", "save_final")
+    # human_queue 후에도 auto_injected 액션 (회사 DB 기록) 만 실행하고 종료.
+    g.add_edge("human_queue", "auto_action_executor")
+    g.add_edge("auto_action_executor", "save_final")
+    g.add_edge("save_final", END)
 
     return g.compile()
