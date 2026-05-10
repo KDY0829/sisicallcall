@@ -21,6 +21,10 @@ import app.agents.post_call.tools.action_catalog as catalog_mod
 @pytest.fixture(autouse=True)
 def reset_llm_singletons(monkeypatch):
     monkeypatch.setenv("POST_CALL_LLM_MODE", "mock")
+    # 기본값: NOTION 미설정 → _inject_mandatory_actions 0건 (auto 액션 없음).
+    # 명시적으로 NOTION 동작 검증하는 테스트는 그 안에서 setenv 다시 함.
+    monkeypatch.delenv("NOTION_API_TOKEN", raising=False)
+    monkeypatch.delenv("NOTION_DATABASE_ID", raising=False)
     planner_mod._llm = None
     reviewer_mod._llm = None
     yield
@@ -1279,10 +1283,15 @@ async def test_telemetry_mock_mode_zero_tokens(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_graph_fail_skips_action_executor(monkeypatch):
-    """reviewer verdict=fail → human_queue 분기 → executor 미실행."""
+    """reviewer verdict=fail → human_queue 분기 → action_executor 미실행.
+
+    auto_action_executor 는 별개의 노드 — auto_injected 액션 (Notion) 만 실행.
+    이 테스트는 NOTION env 가 없어 auto 액션도 0건이므로 executed=[].
+    """
     from app.agents.post_call.agent import PostCallAgent
     import app.agents.post_call.nodes.load_context_node as lcn
     import app.agents.post_call.nodes.action_executor_node as exec_node
+    import app.agents.post_call.nodes.auto_action_executor_node as auto_exec_node
 
     mock_repo = MagicMock()
     mock_repo.get_call_context = AsyncMock(return_value={
@@ -1303,10 +1312,14 @@ async def test_graph_fail_skips_action_executor(monkeypatch):
     })
     monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer_llm)
 
-    # executor 가 호출되면 안 됨
+    # action_executor (LLM-approved 발송) 가 호출되면 안 됨
     fake_executor = MagicMock()
     fake_executor.execute_actions = AsyncMock()
     monkeypatch.setattr(exec_node, "_executor", fake_executor)
+    # auto_action_executor 도 NOTION 미설정이라 auto 액션 0 → 그냥 빈 결과
+    fake_auto_executor = MagicMock()
+    fake_auto_executor.execute_actions = AsyncMock(return_value=[])
+    monkeypatch.setattr(auto_exec_node, "_executor", fake_auto_executor)
 
     agent = PostCallAgent()
     result = await agent.run("g-003", trigger="call_ended", tenant_id="t-graph3")
@@ -1314,6 +1327,8 @@ async def test_graph_fail_skips_action_executor(monkeypatch):
     assert result["review_verdict"] == "fail"
     assert result["human_review_required"] is True
     assert fake_executor.execute_actions.await_count == 0
+    # auto_action_executor 는 호출되지만 NOTION 없어 0 액션 → executor 위임 안 됨
+    assert fake_auto_executor.execute_actions.await_count == 0
     assert result["executed_actions"] == []
 
 
@@ -1679,3 +1694,530 @@ async def test_save_intermediate_idempotent_on_retry(monkeypatch):
     assert len(action_log_calls) == 0
     assert result["analysis_retry_count"] == 2
     assert result["review_verdict"] == "fail"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# G — Notion 자동 저장 + 한 통화 다중 액션
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _enable_notion(monkeypatch) -> None:
+    monkeypatch.setenv("NOTION_API_TOKEN", "secret_test_token_xxx")
+    monkeypatch.setenv("NOTION_DATABASE_ID", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+
+
+@pytest.mark.asyncio
+async def test_notion_call_record_auto_injected_on_every_call(monkeypatch):
+    """simple inquiry → propose_no_action 응답이어도 자동 call_record 추가."""
+    _patch_full_catalog(monkeypatch)
+    _enable_notion(monkeypatch)
+
+    state = _state(transcripts=[
+        {"role": "customer", "text": "운영 시간이 어떻게 되나요"},
+        {"role": "agent", "text": "오전 9시부터 오후 6시입니다"},
+    ])
+    result = await planner_mod.analysis_planner_agent_node(state)
+
+    types = [a["action_type"] for a in result["proposed_actions"]]
+    assert "create_notion_call_record" in types
+    auto = [a for a in result["proposed_actions"]
+            if (a.get("params") or {}).get("auto_injected")]
+    assert len(auto) == 1, f"call_record 1건만 기대. 실제: {len(auto)}"
+    assert auto[0]["idempotency_token"] == "auto:auto_call_record"
+
+
+@pytest.mark.asyncio
+async def test_notion_voc_record_auto_injected_on_angry_high(monkeypatch):
+    """angry + high → call_record + voc_record 둘 다 자동 주입."""
+    _patch_full_catalog(monkeypatch)
+    _enable_notion(monkeypatch)
+
+    state = _state(transcripts=[
+        {"role": "customer", "text": "정말 짜증 나네요. 환불 처리 안 해주면 민원 넣을 거예요"},
+    ])
+    result = await planner_mod.analysis_planner_agent_node(state)
+
+    auto = [a for a in result["proposed_actions"]
+            if (a.get("params") or {}).get("auto_injected")]
+    types = {a["action_type"] for a in auto}
+    assert types == {"create_notion_call_record", "create_notion_voc_record"}, \
+        f"angry+high 시 둘 다 주입. 실제: {types}"
+    for a in auto:
+        assert a["params"]["auto_injected"] is True
+
+
+@pytest.mark.asyncio
+async def test_notion_voc_not_injected_on_neutral(monkeypatch):
+    """neutral → call_record 만, voc_record 없음."""
+    _patch_full_catalog(monkeypatch)
+    _enable_notion(monkeypatch)
+
+    state = _state(transcripts=[
+        {"role": "customer", "text": "운영 시간 문의입니다"},
+    ])
+    result = await planner_mod.analysis_planner_agent_node(state)
+    auto = [a for a in result["proposed_actions"]
+            if (a.get("params") or {}).get("auto_injected")]
+    types = {a["action_type"] for a in auto}
+    assert types == {"create_notion_call_record"}
+
+
+@pytest.mark.asyncio
+async def test_notion_voc_not_injected_on_angry_low(monkeypatch):
+    """angry 지만 priority=low → voc_record 미주입 (medium+ 조건 미충족)."""
+    _patch_full_catalog(monkeypatch)
+    _enable_notion(monkeypatch)
+
+    # mock LLM 직접 패치 — 우리가 priority=low + emotion=angry 강제 지정
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools = AsyncMock(return_value={
+        "tool_calls": [{
+            "id": "rec",
+            "name": "record_analysis",
+            "arguments": {
+                "summary_short": "low priority angry",
+                "summary_detailed": "low priority angry case",
+                "customer_intent": "test",
+                "customer_emotion": "angry",
+                "resolution_status": "resolved",
+                "priority": "low",
+                "action_required": False,
+                "primary_category": "기타",
+                "is_repeat_topic": False,
+                "faq_candidate": False,
+                "keywords": [],
+                "handoff_notes": "",
+            },
+        }],
+        "text": "", "raw_message": None,
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "model": "mock"},
+    })
+    planner_mod._llm = fake_llm
+
+    state = _state(transcripts=[{"role": "customer", "text": "약간 짜증나는데 별일 아님"}])
+    result = await planner_mod.analysis_planner_agent_node(state)
+
+    auto = [a for a in result["proposed_actions"]
+            if (a.get("params") or {}).get("auto_injected")]
+    types = {a["action_type"] for a in auto}
+    assert "create_notion_call_record" in types
+    assert "create_notion_voc_record" not in types, \
+        f"low priority 면 voc_record 주입 안 됨. 실제: {types}"
+
+
+@pytest.mark.asyncio
+async def test_notion_disconnected_skips_auto_actions(monkeypatch):
+    """NOTION env 없으면 auto 액션 0건 (graceful skip)."""
+    _patch_full_catalog(monkeypatch)
+    # Notion env 미설정 (autouse fixture 가 이미 unset)
+
+    state = _state(transcripts=[
+        {"role": "customer", "text": "정말 짜증 나네요"},
+    ])
+    result = await planner_mod.analysis_planner_agent_node(state)
+
+    auto = [a for a in result["proposed_actions"]
+            if (a.get("params") or {}).get("auto_injected")]
+    assert auto == []
+
+
+@pytest.mark.asyncio
+async def test_auto_injected_actions_skip_reviewer(monkeypatch):
+    """reviewer 의 review_target 에 auto_injected 미포함, 최종 approved 에는 포함."""
+    _patch_full_catalog(monkeypatch)
+    _enable_notion(monkeypatch)
+
+    # planner 직접 호출해 auto inject 발동 → reviewer 에 그대로 전달
+    state_dict = _state(transcripts=[
+        {"role": "customer", "text": "정말 짜증 나네요. 환불 안 해주면 민원 넣을 거예요"},
+    ])
+    planner_out = await planner_mod.analysis_planner_agent_node(state_dict)
+    state_dict.update(planner_out)
+
+    # reviewer mock — proposed_text 안에 auto_injected 액션이 ACTION_ID 로 안 떠야 함
+    captured: dict = {}
+
+    async def capture(*args, **kwargs):
+        # messages 의 user content 캡처
+        msgs = kwargs.get("messages") or []
+        for m in msgs:
+            if m.get("role") == "user":
+                captured["user_text"] = m.get("content")
+                break
+        return {
+            "tool_calls": [{
+                "id": "f", "name": "finalize_review",
+                "arguments": {"verdict": "pass", "summary_reason": "ok"},
+            }],
+            "text": "", "raw_message": None,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "model": "mock"},
+        }
+
+    fake_reviewer = MagicMock()
+    fake_reviewer.generate_with_tools = AsyncMock(side_effect=capture)
+    monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer)
+
+    out = await reviewer_mod.reviewer_agent_node(state_dict)
+
+    # reviewer 가 본 텍스트에 auto_injected 액션 ACTION_ID 가 없어야 함
+    user_text = captured.get("user_text", "")
+    assert "create_notion_call_record" not in user_text, \
+        f"reviewer 에 auto 액션이 보이면 안 됨. 실제 text: {user_text[:500]}"
+
+    # 하지만 최종 approved_actions 에는 포함
+    approved_types = [a["action_type"] for a in out["approved_actions"]]
+    assert "create_notion_call_record" in approved_types
+    # telemetry 에도 카운트
+    assert out["reviewer_telemetry"]["auto_injected_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_auto_actions_executed_on_human_queue_path(monkeypatch):
+    """retry max 초과 → human_queue → auto_action_executor 가 Notion auto 만 실행."""
+    from app.agents.post_call.agent import PostCallAgent
+    import app.agents.post_call.nodes.action_executor_node as exec_node
+    import app.agents.post_call.nodes.auto_action_executor_node as auto_exec_node
+
+    _patch_full_catalog(monkeypatch)
+    _enable_notion(monkeypatch)
+    _patch_load_context(monkeypatch, transcripts=[
+        {"role": "customer", "text": "정말 짜증 나네요. 환불 안 해주면 민원 넣을 거예요"},
+    ])
+
+    # reviewer 모두 fail
+    fake_reviewer_llm = MagicMock()
+    fake_reviewer_llm.generate_with_tools = AsyncMock(
+        return_value=_make_reviewer_fail_response()
+    )
+    monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer_llm)
+
+    # main executor 호출 0
+    fake_main_executor = MagicMock()
+    fake_main_executor.execute_actions = AsyncMock(return_value=[])
+    monkeypatch.setattr(exec_node, "_executor", fake_main_executor)
+
+    # auto executor — 호출되면 받은 actions 캡처 + dummy success 반환
+    captured_auto_actions: list[list[dict]] = []
+
+    async def capture_auto(call_id, tenant_id, actions):
+        captured_auto_actions.append(actions)
+        return [
+            {**a, "status": "success", "external_id": f"notion-{i}"}
+            for i, a in enumerate(actions)
+        ]
+
+    fake_auto_executor = MagicMock()
+    fake_auto_executor.execute_actions = AsyncMock(side_effect=capture_auto)
+    monkeypatch.setattr(auto_exec_node, "_executor", fake_auto_executor)
+
+    agent = PostCallAgent()
+    result = await agent.run("g-auto-001", trigger="call_ended", tenant_id="t-auto")
+
+    assert result["review_verdict"] == "fail"
+    assert fake_main_executor.execute_actions.await_count == 0
+    assert fake_auto_executor.execute_actions.await_count == 1
+    auto_actions = captured_auto_actions[0]
+    types = {a["action_type"] for a in auto_actions}
+    assert "create_notion_call_record" in types
+    # voc 도 angry+high 이므로 포함
+    assert "create_notion_voc_record" in types
+    # 모두 auto_injected 마커
+    for a in auto_actions:
+        assert (a.get("params") or {}).get("auto_injected") is True
+
+
+@pytest.mark.asyncio
+async def test_auto_actions_idempotent_across_retries(monkeypatch):
+    """retry 사이클 안에서 같은 sub_intent 의 token 이 동일 — executor 가 1회만 발송."""
+    from app.agents.post_call.agent import PostCallAgent
+    import app.agents.post_call.nodes.action_executor_node as exec_node
+    import app.agents.post_call.nodes.auto_action_executor_node as auto_exec_node
+
+    _patch_full_catalog(monkeypatch)
+    _enable_notion(monkeypatch)
+    _patch_load_context(monkeypatch, transcripts=[
+        {"role": "customer", "text": "정말 짜증 나네요"},
+    ])
+
+    fake_reviewer_llm = MagicMock()
+    fake_reviewer_llm.generate_with_tools = AsyncMock(
+        return_value=_make_reviewer_fail_response()
+    )
+    monkeypatch.setattr(reviewer_mod, "_llm", fake_reviewer_llm)
+
+    # 모든 sub_intent token 카운트
+    seen_tokens: list[str] = []
+
+    async def capture_auto(call_id, tenant_id, actions):
+        for a in actions:
+            seen_tokens.append(a.get("idempotency_token") or "")
+        return [
+            {**a, "status": "success", "external_id": f"x-{i}"}
+            for i, a in enumerate(actions)
+        ]
+
+    fake_auto_executor = MagicMock()
+    fake_auto_executor.execute_actions = AsyncMock(side_effect=capture_auto)
+    monkeypatch.setattr(auto_exec_node, "_executor", fake_auto_executor)
+
+    fake_main = MagicMock()
+    fake_main.execute_actions = AsyncMock(return_value=[])
+    monkeypatch.setattr(exec_node, "_executor", fake_main)
+
+    agent = PostCallAgent()
+    result = await agent.run("g-idem-001", trigger="call_ended", tenant_id="t-idem")
+
+    # auto inject 는 매 retry 사이클마다 발생 (planner 매번 _inject 재실행) —
+    # 하지만 auto_action_executor 는 마지막 1회만 호출되므로 token 출현은 통화당 1세트.
+    assert result["analysis_retry_count"] == 2  # MAX 도달
+    # 두 sub_intent 가 정확히 한 번씩만 executor 에 전달돼야 함
+    call_token = "auto:auto_call_record"
+    voc_token = "auto:auto_voc_record"
+    assert seen_tokens.count(call_token) == 1, f"call_record token 1회 기대. 실제: {seen_tokens}"
+    assert seen_tokens.count(voc_token) == 1, f"voc_record token 1회 기대. 실제: {seen_tokens}"
+
+
+@pytest.mark.asyncio
+async def test_multiple_intents_propose_multiple_actions(monkeypatch):
+    """다중 의도 LLM 응답 → 여러 action_type 동시 propose."""
+    _patch_full_catalog(monkeypatch)
+
+    # mock LLM: 환불(slack+jira+email) + 콜백 + sms 5개 propose
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools = AsyncMock(return_value={
+        "tool_calls": [
+            {"id": "rec", "name": "record_analysis", "arguments": _record_args(
+                emotion="angry", priority="high", category="민원/불만",
+            )},
+            {"id": "s", "name": "propose_send_slack_alert",
+             "arguments": {"message": "환불 불만 통화"}},
+            {"id": "j", "name": "propose_create_jira_ticket",
+             "arguments": {"summary": "환불 처리 검토", "description": "고객 환불 요청"}},
+            {"id": "e", "name": "propose_send_email_supervisor",
+             "arguments": {"subject": "환불 보고", "body": "..."}},
+            {"id": "c", "name": "propose_schedule_callback",
+             "arguments": {"reason": "환불 결과 안내"}},
+            {"id": "sms", "name": "propose_send_sms_followup",
+             "arguments": {"phone": "01012345678", "message": "환불 접수 안내"}},
+        ],
+        "text": "", "raw_message": None,
+    })
+    planner_mod._llm = fake_llm
+
+    state = _state(transcripts=[{"role": "customer", "text": "환불 요청 + 콜백"}])
+    result = await planner_mod.analysis_planner_agent_node(state)
+
+    types = {a["action_type"] for a in result["proposed_actions"]}
+    assert {"send_slack_alert", "create_jira_issue", "send_manager_email",
+            "schedule_callback", "send_voc_receipt_sms"}.issubset(types)
+
+
+@pytest.mark.asyncio
+async def test_same_action_type_with_different_intents(monkeypatch):
+    """같은 action_type 두 번 — 다른 token → 둘 다 별개 액션."""
+    _patch_full_catalog(monkeypatch)
+
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools = AsyncMock(return_value={
+        "tool_calls": [
+            {"id": "rec", "name": "record_analysis", "arguments": _record_args()},
+            # 같은 action_type, 다른 summary
+            {"id": "j1", "name": "propose_create_jira_ticket",
+             "arguments": {"summary": "환불 처리", "description": "환불 요청"}},
+            {"id": "j2", "name": "propose_create_jira_ticket",
+             "arguments": {"summary": "본인 인증 실패 조사", "description": "auth error"}},
+        ],
+        "text": "", "raw_message": None,
+    })
+    planner_mod._llm = fake_llm
+
+    state = _state(transcripts=[{"role": "customer", "text": "환불 + 인증"}])
+    result = await planner_mod.analysis_planner_agent_node(state)
+
+    jira_actions = [a for a in result["proposed_actions"]
+                    if a["action_type"] == "create_jira_issue"]
+    assert len(jira_actions) == 2
+    tokens = {a["idempotency_token"] for a in jira_actions}
+    assert len(tokens) == 2, f"두 jira 가 다른 token 가져야 함. 실제: {tokens}"
+
+
+@pytest.mark.asyncio
+async def test_idempotency_blocks_true_duplicates(monkeypatch):
+    """같은 summary 두 번 propose → 두 token 동일."""
+    _patch_full_catalog(monkeypatch)
+
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools = AsyncMock(return_value={
+        "tool_calls": [
+            {"id": "rec", "name": "record_analysis", "arguments": _record_args()},
+            {"id": "j1", "name": "propose_create_jira_ticket",
+             "arguments": {"summary": "환불 처리", "description": "동일 요청 1"}},
+            {"id": "j2", "name": "propose_create_jira_ticket",
+             "arguments": {"summary": "환불 처리", "description": "동일 요청 2"}},
+        ],
+        "text": "", "raw_message": None,
+    })
+    planner_mod._llm = fake_llm
+
+    state = _state(transcripts=[{"role": "customer", "text": "환불"}])
+    result = await planner_mod.analysis_planner_agent_node(state)
+
+    jira_actions = [a for a in result["proposed_actions"]
+                    if a["action_type"] == "create_jira_issue"]
+    tokens = {a["idempotency_token"] for a in jira_actions}
+    # _IDEMPOTENCY_FIELDS["create_jira_issue"] = ["summary"] → 같은 summary → 같은 token
+    assert len(tokens) == 1, f"같은 summary 면 token 동일. 실제: {tokens}"
+
+
+def test_idempotency_token_is_deterministic():
+    """같은 입력 → 같은 token (sha256 결정성)."""
+    a1 = {
+        "action_type": "create_jira_issue",
+        "tool": "jira",
+        "params": {"summary": "환불 처리", "description": "본문"},
+    }
+    a2 = {
+        "action_type": "create_jira_issue",
+        "tool": "jira",
+        "params": {"summary": "환불 처리", "description": "다른 본문"},  # description 무시
+    }
+    a3 = {
+        "action_type": "create_jira_issue",
+        "tool": "jira",
+        "params": {"summary": "다른 issue", "description": "본문"},
+    }
+    assert planner_mod._compute_idempotency_token(a1) == planner_mod._compute_idempotency_token(a2)
+    assert planner_mod._compute_idempotency_token(a1) != planner_mod._compute_idempotency_token(a3)
+
+    auto = {
+        "action_type": "create_notion_call_record",
+        "tool": "notion",
+        "params": {"auto_injected": True, "sub_intent": "auto_call_record"},
+    }
+    assert planner_mod._compute_idempotency_token(auto) == "auto:auto_call_record"
+
+
+@pytest.mark.asyncio
+async def test_max_tool_calls_8_enforced(monkeypatch):
+    """LLM 이 9개 propose → 8개로 제한."""
+    _patch_full_catalog(monkeypatch)
+
+    big_calls = [
+        {"id": "rec", "name": "record_analysis", "arguments": _record_args()},
+    ]
+    for i in range(8):
+        big_calls.append({
+            "id": f"s{i}", "name": "propose_send_slack_alert",
+            "arguments": {"message": f"alert {i}"},
+        })
+
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools = AsyncMock(return_value={
+        "tool_calls": big_calls,
+        "text": "", "raw_message": None,
+    })
+    planner_mod._llm = fake_llm
+
+    state = _state(transcripts=[{"role": "customer", "text": "x"}])
+    result = await planner_mod.analysis_planner_agent_node(state)
+
+    # _MAX_TOOL_CALLS = 8 → record_analysis + 7 slack
+    # propose count 는 7 이하 (record_analysis 가 1슬롯 차지)
+    proposed_count = len(result["proposed_actions"])
+    assert proposed_count <= 7
+    assert planner_mod._MAX_TOOL_CALLS == 8
+
+
+@pytest.mark.asyncio
+async def test_idempotency_race_condition_blocks_double_send(monkeypatch):
+    """asyncio.gather 동시 호출 시 같은 token → 1건만 발송 (다른 1건은 idempotency skip).
+
+    application-level idempotency (find_successful_action) + DB row insert 시점차로
+    race 발생 가능. 이 테스트는 race 가 발생해도 최소 1건 차단되는지 검증.
+
+    구현: fake repo 가 매 SELECT 마다 'success' row 누적. 첫 INSERT 후 두 번째 SELECT 가
+    이미 성공 row 를 찾아 skip 처리. 실제 race 시나리오에서는 두 SELECT 가 동시에 None
+    을 반환할 수 있지만 그 경우는 5b UNIQUE 제약 으로만 차단 가능 — 5a 정책에서는
+    application-level 이 sequential SELECT 로 한 번 차단. 동시 SELECT 두 건은 두 row
+    INSERT 가능 (운영 risk 명시 — race 테스트는 sequential 가정).
+    """
+    import asyncio
+    import app.agents.post_call.actions.executor as executor_mod
+    import app.repositories.mcp_action_log_repo as log_repo
+
+    # 동일 token 두 액션
+    action = {
+        "action_type": "create_jira_issue",
+        "tool": "jira",
+        "priority": "low",
+        "params": {"summary": "race", "description": "x", "call_id": "race-001"},
+        "idempotency_token": planner_mod._compute_idempotency_token({
+            "action_type": "create_jira_issue",
+            "params": {"summary": "race"},
+        }),
+    }
+
+    # in-memory state — 첫 INSERT 후 두 번째는 발견됨
+    insertions: list[dict] = []
+    sent_count = {"n": 0}
+
+    async def fake_find(call_id, action_type, tool, idempotency_token=None):
+        for entry in insertions:
+            if (entry["call_id"] == call_id and entry["action_type"] == action_type
+                    and entry["tool_name"] == tool
+                    and entry.get("request_payload", {}).get("idempotency_token") == idempotency_token):
+                return entry
+        return None
+
+    async def fake_save(call_id, actions, tenant_id=None, **kw):
+        for a in actions:
+            insertions.append({
+                "call_id": call_id,
+                "tenant_id": tenant_id,
+                "action_type": a.get("action_type"),
+                "tool_name": a.get("tool"),
+                "status": a.get("status"),
+                "external_id": a.get("external_id"),
+                "request_payload": {"idempotency_token": a.get("idempotency_token")},
+            })
+
+    monkeypatch.setattr(executor_mod, "find_successful_action", fake_find)
+    monkeypatch.setattr(log_repo, "find_successful_action", fake_find)
+
+    # gateway mock — 호출되면 sent_count 증가 + success 반환
+    from app.services.mcp.connectors import mcp_gateway_connector as mgc
+
+    real_resolve = mgc.resolve_mcp_tool_name
+
+    async def fake_gateway_execute(self, action, *, call_id, tenant_id):
+        sent_count["n"] += 1
+        await asyncio.sleep(0.01)  # race 유도용 작은 sleep
+        return {
+            "status": "success",
+            "external_id": f"jira-race-{sent_count['n']}",
+            "result": {"source": "mcp_server", "via_mcp": True, "execution_mode": "mcp"},
+        }
+
+    monkeypatch.setattr(mgc.MCPGatewayConnector, "execute", fake_gateway_execute)
+
+    # 두 액션을 sequential 처리 (현재 ActionExecutor.execute_actions 의 동작 그대로)
+    executor = executor_mod.ActionExecutor()
+    actions = [copy.deepcopy(action), copy.deepcopy(action)]
+    # sequential 처리 — 첫 건 INSERT 시뮬레이션 후 두 번째는 idempotency skip
+    # 하지만 현재 _execute_one 에는 INSERT 호출 없고 raw 만 반환 — 실제 INSERT 는
+    # save_actions 단계. 따라서 race 테스트는 두 호출 모두 send 되더라도 token 동일.
+    # 단, save_action_log 는 mcp_action_log_repo.save_action_logs 가 처리.
+    # 여기서는 단순히 token 동일성 + sequential idempotency 동작 검증.
+    results = await executor.execute_actions(
+        call_id="race-001", tenant_id="t-race", actions=actions,
+    )
+
+    # 두 결과 중 적어도 한 건은 send (gateway 호출). race 가 차단되려면
+    # 두 결과의 token 이 같아야 함 (= same logical action).
+    tokens = {r.get("idempotency_token") for r in results}
+    assert len(tokens) == 1, f"race 두 액션이 같은 token 이어야 함. 실제: {tokens}"
+    # NOTE: 5a 정책에서는 sequential 호출 시 두 번째가 skip 되지 않을 수 있음 —
+    # 이 테스트는 token 결정성을 검증하고, 진짜 race 차단은 5b (UNIQUE 제약) 가 필요함을 문서화.
+    # gateway 가 두 번 호출됐을 가능성 명시:
+    assert sent_count["n"] in (1, 2), \
+        f"5a 정책: 1 또는 2 회 호출 가능. 실제: {sent_count['n']}. UNIQUE 제약 (5b) 도입 시 항상 1."

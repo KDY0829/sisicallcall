@@ -97,16 +97,20 @@ async def _fetch_call_summary(db_call_uuid: str) -> dict | None:
 
 
 class _ReviewerForceFailFirstThenDelegate:
-    """reviewer._llm 의 첫 호출만 강제 fail. 그 후엔 원본 위임."""
+    """reviewer._llm 의 첫 호출만 강제 fail. 그 후엔 원본 위임.
 
-    def __init__(self, real_llm) -> None:
+    fail_all=True 면 모든 호출 강제 fail (max retry 도달 → human_queue → auto_action_executor 검증용).
+    """
+
+    def __init__(self, real_llm, fail_all: bool = False) -> None:
         self._real = real_llm
         self._call_n = 0
         self._calls_log: list[dict] = []
+        self._fail_all = fail_all
 
     async def generate_with_tools(self, **kwargs):
         self._call_n += 1
-        if self._call_n == 1:
+        if self._call_n == 1 or self._fail_all:
             entry = {
                 "call_n": 1,
                 "mode": "FORCE_FAIL",
@@ -297,8 +301,15 @@ def _verify(report: dict, raw_captures: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def run_one(call_id_label: str, tenant_id: str, output_dir: Path) -> dict:
-    print(f"\n=== retry verify: {call_id_label} (tenant={tenant_id}) ===")
+async def run_one(
+    call_id_label: str,
+    tenant_id: str,
+    output_dir: Path,
+    *,
+    fail_all: bool = False,
+) -> dict:
+    print(f"\n=== retry verify: {call_id_label} (tenant={tenant_id}) "
+          f"{'fail_all' if fail_all else 'fail_once'} ===")
 
     db_call_uuid = await _resolve_db_call_uuid(call_id_label, tenant_id)
     if db_call_uuid is None:
@@ -311,7 +322,7 @@ async def run_one(call_id_label: str, tenant_id: str, output_dir: Path) -> dict:
     orig_planner = planner_mod._get_llm()
 
     log_dir = output_dir / f"{call_id_label}_planner_calls"
-    rev_wrap = _ReviewerForceFailFirstThenDelegate(orig_reviewer)
+    rev_wrap = _ReviewerForceFailFirstThenDelegate(orig_reviewer, fail_all=fail_all)
     pln_wrap = _PlannerLoggingWrap(orig_planner, log_dir)
     reviewer_mod._llm = rev_wrap
     planner_mod._llm = pln_wrap
@@ -412,13 +423,13 @@ async def run_one(call_id_label: str, tenant_id: str, output_dir: Path) -> dict:
     return report
 
 
-async def main_async(tenant_id: str, call_ids: list[str]) -> None:
+async def main_async(tenant_id: str, call_ids: list[str], *, fail_all: bool = False) -> None:
     output_dir = PROJ / ".local" / "e2e_retry_results"
     print(f"POST_CALL_LLM_MODE={os.environ.get('POST_CALL_LLM_MODE')}")
     print(f"output_dir = {output_dir}")
     for call_id in call_ids:
         try:
-            await run_one(call_id, tenant_id, output_dir)
+            await run_one(call_id, tenant_id, output_dir, fail_all=fail_all)
         except Exception as exc:
             print(f"  FAILED {call_id}: {type(exc).__name__}: {exc}")
         await asyncio.sleep(1)
@@ -428,10 +439,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tenant-id", default="ba2bf499-6fcc-4340-b3dd-9341f8bcc915")
     parser.add_argument("--call-id", action="append", default=None)
+    parser.add_argument("--fail-all", action="store_true",
+                        help="모든 reviewer 호출 강제 fail (e2e-009 fail+auto only 검증용)")
     args = parser.parse_args()
 
     call_ids = args.call_id or ["e2e-001"]
-    asyncio.run(main_async(args.tenant_id, call_ids))
+    asyncio.run(main_async(args.tenant_id, call_ids, fail_all=args.fail_all))
 
 
 if __name__ == "__main__":

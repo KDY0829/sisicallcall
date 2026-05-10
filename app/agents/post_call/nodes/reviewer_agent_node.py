@@ -73,6 +73,13 @@ _SYSTEM_PROMPT = """당신은 콜센터 후처리 분석/액션 검증 전문가
   인용에 기반한 한 문장. 일반 정책 문구("단순 문의이므로 부적절") 금지.
   예: "고객이 '환불 안 해주면 민원 넣을게요' 발화 — 강한 escalation, slack 알림 정당".
 
+[같은 action_type 의 다중 호출 — 정상]
+- 한 통화에 여러 의도가 있으면 같은 action_type 도 여러 번 propose 될 수 있다.
+  예: VOC 가 두 종류 (불만 + 환불) → propose_create_jira_ticket 두 번.
+- 의도가 다르면 (params 의 핵심 필드가 다르면) 둘 다 approve.
+- params 가 사실상 동일하면 (같은 메시지/같은 시간 등) 두 번째는 reject.
+- 시스템이 idempotency_token 으로 정말 동일한 호출은 자동 차단하므로 검토 부담 낮음.
+
 [빠른 종료 가이드 — V3-1/3]
 - proposed_actions 가 비어있고 분석 결과에 transcript 와 어긋나는 명백한 오류가 없다면,
   첫 step 에서 finalize_review 호출 후 즉시 종료하세요.
@@ -324,9 +331,18 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
             "errors": errors,
         }
 
-    # ── 액션 후보 인덱싱 ─────────────────────────────────────────────────────────
+    # ── auto_injected 액션은 reviewer 우회 (회사 DB 기록은 분석 품질과 무관) ──
+    auto_actions: list[dict] = []
+    review_targets: list[dict] = []
+    for act in proposed:
+        if (act.get("params") or {}).get("auto_injected"):
+            auto_actions.append(copy.deepcopy(act))
+        else:
+            review_targets.append(act)
+
+    # ── 액션 후보 인덱싱 — review_targets 만 LLM 검증 ───────────────────────
     indexed: dict[str, dict] = {}
-    for i, act in enumerate(proposed):
+    for i, act in enumerate(review_targets):
         indexed[_make_action_id(i, act)] = copy.deepcopy(act)
 
     decisions: dict[str, str] = {}     # action_id → "approve" | "reject" | "correct"
@@ -600,7 +616,11 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
         verdict = "pass"
 
     if verdict == "fail":
-        approved_actions = []  # fail 시 외부 액션 차단
+        approved_actions = []  # fail 시 LLM-proposed 외부 액션 차단
+        # auto_injected 액션은 reviewer 와 무관 (회사 DB 기록 무조건 보존).
+        # 다만 fail 시 그래프는 human_queue → auto_action_executor 분기로 가므로
+        # 여기서는 approved_actions 에 포함하지 않는다 — auto_action_executor 가
+        # state["proposed_actions"] 에서 직접 auto 만 필터해 실행한다.
 
     # ── D-4: priority single source of truth — final analysis priority 로 sync ──
     final_priority = (
@@ -609,6 +629,12 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
     )
     approved_actions = _sync_action_priorities(approved_actions, final_priority)
     rejected_actions = _sync_action_priorities(rejected_actions, final_priority)
+
+    # ── auto_injected 액션을 approved 에 prepend (verdict=pass/correctable 시) ──
+    # priority sync 도 함께 적용해서 executor 가 ActionItem.priority 기반 동작 일관.
+    auto_synced = _sync_action_priorities(auto_actions, final_priority) if auto_actions else []
+    if verdict in ("pass", "correctable") and auto_synced:
+        approved_actions = list(auto_synced) + list(approved_actions)
 
     # ── verdict=fail 시 analysis_planner 재시도용 feedback 추출 ────────────────
     feedback_for_retry: list[str] = []
@@ -650,17 +676,19 @@ async def reviewer_agent_node(state: PostCallAgentState) -> dict:
         "steps": steps_used,
         "max_steps_reached": forced_close,
         "latency_ms": latency_ms,
+        "auto_injected_count": len(auto_actions),
     }
 
     logger.info(
         "post_call telemetry node=reviewer call_id=%s tenant=%s "
         "verdict=%s steps=%d max_reached=%s tokens=%d latency_ms=%d "
-        "approved=%d rejected=%d corrections=%d dropped=%d",
+        "approved=%d rejected=%d corrections=%d dropped=%d auto_injected=%d",
         call_id, tenant_id,
         verdict, steps_used, forced_close,
         tokens_total["total"], latency_ms,
         len(approved_actions), len(rejected_actions),
         len(analysis_corrections), len(corrections_dropped),
+        len(auto_actions),
     )
 
     return {

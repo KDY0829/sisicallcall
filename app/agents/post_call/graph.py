@@ -1,24 +1,29 @@
 """Post-call 2-에이전트 그래프.
 
   load_context
-    → analysis_planner_agent          (Agent 1: 분석 + 액션 후보 propose)
+    → analysis_planner_agent          (Agent 1: 분석 + 액션 후보 propose + auto inject)
     → save_intermediate                (분석 결과 무조건 저장 — 대시보드 보장)
     → escalation_immediate? END
-    → reviewer_agent                   (Agent 2: ReAct 루프 검증)
+    → reviewer_agent                   (Agent 2: ReAct 루프 검증, auto_injected 우회)
         ├ pass / correctable          → action_executor → save_final → END
+        │                               (auto + LLM-approved 모두 실행)
         ├ fail (retry < MAX)          → increment_analysis_retry → analysis_planner_agent
         │                               (review_feedback 누적 + 분석 재실행)
-        └ fail (retry ≥ MAX)          → human_queue → save_final → END
+        └ fail (retry ≥ MAX)          → human_queue → auto_action_executor → save_final → END
+                                        (LLM-proposed 차단, auto 만 실행 — 회사 DB 기록 보장)
 
 분석/요약은 reviewer 통과 여부와 무관하게 save_intermediate 단계에서 저장된다 —
 reviewer 가 실패하더라도 call_summaries / voc_analyses 는 보장된다 (ON CONFLICT
 upsert 이므로 retry 시 중복 INSERT 발생 안 함).
 
-외부 MCP 액션은 reviewer 통과 시에만 실행된다.
+자동 주입 액션 (Notion 회사 DB 기록) 은 reviewer 우회. retry 사이클 동안 매번
+재주입되지만 idempotency_token 으로 첫 시도 후 executor 가 skip — 통화당 1건 보장.
+
+외부 MCP 액션 (Slack/Jira/Calendar 등) 은 reviewer 통과 시에만 실행된다.
 
 retry 가드:
   - MAX_ANALYSIS_RETRIES = 2 (총 3회 = 최초 + 재시도 2회)
-  - retry 한도 초과 시 강제 human_queue
+  - retry 한도 초과 시 human_queue → auto_action_executor (auto 만 발송)
   - retry 시 LLM 비용 증가 — telemetry 에 retry_count 기록
 """
 from __future__ import annotations
@@ -28,6 +33,7 @@ from langgraph.graph import StateGraph, END
 from app.agents.post_call.state import PostCallAgentState
 from app.agents.post_call.nodes.action_executor_node import action_executor_node
 from app.agents.post_call.nodes.analysis_planner_agent_node import analysis_planner_agent_node
+from app.agents.post_call.nodes.auto_action_executor_node import auto_action_executor_node
 from app.agents.post_call.nodes.human_queue_node import human_queue_node
 from app.agents.post_call.nodes.increment_analysis_retry_node import (
     increment_analysis_retry_node,
@@ -75,6 +81,7 @@ def build_post_call_graph():
     g.add_node("increment_analysis_retry", increment_analysis_retry_node)
     g.add_node("action_executor", action_executor_node)
     g.add_node("human_queue", human_queue_node)
+    g.add_node("auto_action_executor", auto_action_executor_node)
     g.add_node("save_final", save_final_node)
 
     g.set_entry_point("load_context")
@@ -102,7 +109,9 @@ def build_post_call_graph():
     g.add_edge("increment_analysis_retry", "analysis_planner_agent")
 
     g.add_edge("action_executor", "save_final")
-    g.add_edge("human_queue", "save_final")
+    # human_queue 후에도 auto_injected 액션 (회사 DB 기록) 만 실행하고 종료.
+    g.add_edge("human_queue", "auto_action_executor")
+    g.add_edge("auto_action_executor", "save_final")
     g.add_edge("save_final", END)
 
     return g.compile()

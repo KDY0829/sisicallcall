@@ -33,15 +33,28 @@ import app.repositories.dashboard_repo as dashboard_mod
 # ── Store 격리 픽스처 ─────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def reset_stores():
+def reset_stores(monkeypatch):
+    """call_summary / voc / dashboard 는 _reset() 그대로. mcp_action_log 는 db-only
+    가 됐으므로 asyncpg.connect 를 fake 로 패치 — 단위 테스트는 INSERT 가
+    no-op 로 진행되도록 한다 (별도 SELECT 검증이 필요한 테스트는 자체 mock).
+    """
     summary_mod._reset()
     voc_mod._reset()
-    action_mod._reset()
     dashboard_mod._reset()
+
+    class _NoopConn:
+        async def execute(self, *a, **kw): return "INSERT 0 1"
+        async def fetch(self, *a, **kw): return []
+        async def fetchrow(self, *a, **kw): return None
+        async def close(self): return None
+
+    async def _fake_connect(url):
+        return _NoopConn()
+
+    monkeypatch.setattr(action_mod.asyncpg, "connect", _fake_connect)
     yield
     summary_mod._reset()
     voc_mod._reset()
-    action_mod._reset()
     dashboard_mod._reset()
     summary_mod._context_store.clear()
 
@@ -61,8 +74,7 @@ def force_post_call_tests_mock_mode(monkeypatch, tmp_path):
         "POST_CALL_ENABLE_NOTION_RECORD",
     ):
         monkeypatch.setenv(key, "false")
-    monkeypatch.setenv("MCP_ACTION_LOG_STORE", "file")
-    monkeypatch.setenv("MCP_ACTION_LOG_FILE", str(tmp_path / "mcp_action_logs.json"))
+    # NOTE: MCP_ACTION_LOG_STORE / MCP_ACTION_LOG_FILE 는 db-only 전환으로 제거됨.
 
 
 # ── API 테스트용 미니 앱 ──────────────────────────────────────────────────────

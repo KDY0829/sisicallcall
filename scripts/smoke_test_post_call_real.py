@@ -28,10 +28,9 @@ load_dotenv(PROJ / ".env", override=False)
 
 # ── 실 LLM 모드 강제 ────────────────────────────────────────────────────────
 os.environ["POST_CALL_LLM_MODE"] = "real"
-# tenant_integrations 는 db-only repository 가 됐으므로 별도 storage 강제 불필요.
-# 이 스크립트는 list_integrations 를 monkeypatch 로 fake 하므로 DB 조회도 안 한다.
-os.environ.setdefault("MCP_ACTION_LOG_STORE", "file")
-os.environ.setdefault("MCP_ACTION_LOG_FILE", str(PROJ / ".local" / "smoke_test_results" / "_action_log.json"))
+# tenant_integrations / mcp_action_logs 둘 다 db-only repository 라 별도 storage
+# 환경변수 강제 불필요. 이 스크립트는 list_integrations 를 monkeypatch 로 fake
+# 한다. mcp_action_logs 는 settings.database_url 의 Postgres 로 직접 INSERT.
 
 
 import app.agents.post_call.nodes.analysis_planner_agent_node as planner_mod  # noqa: E402

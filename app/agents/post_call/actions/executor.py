@@ -68,19 +68,25 @@ class ActionExecutor:
 
         tool_key = action.get("tool", "")
         action_type = action.get("action_type", "")
+        idempotency_token = action.get("idempotency_token")
 
         # ── idempotency check ───────────────────────────────────────────────
+        # token 이 있으면 (call_id, action_type, tool, token) 4-tuple 매칭 — 같은
+        # action_type 이라도 의도가 다르면 token 이 달라 별개 액션으로 처리됨.
+        # token 이 없으면 (call_id, action_type, tool) 3-tuple — 옛 동작 유지.
         previous = await find_successful_action(
             call_id=call_id,
             action_type=action_type,
             tool=tool_key,
+            idempotency_token=idempotency_token,
         )
         if previous:
             logger.info(
-                "action idempotency skip call_id=%s tool=%s action_type=%s previous_external_id=%s",
+                "action idempotency skip call_id=%s tool=%s action_type=%s token=%s previous_external_id=%s",
                 call_id,
                 tool_key,
                 action_type,
+                idempotency_token,
                 previous.get("external_id"),
             )
             skip_result: dict = {

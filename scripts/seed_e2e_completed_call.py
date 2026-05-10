@@ -101,6 +101,48 @@ SCENARIOS: dict[str, dict] = {
             {"role": "customer", "text": "감사합니다."},
         ],
     },
+    "e2e-007": {
+        # 다중 의도: 환불 요청(불만) + 콜백 + 본인인증 → 5개+ 액션 기대
+        "scenario": "multi_intent",
+        "caller_number": "010-0000-0000",
+        "branch_stats": {"faq": 0, "task": 1, "escalation": 1},
+        "transcripts": [
+            {"role": "customer", "text": "지난주 결제한 건이 이중으로 청구됐어요. 환불 처리해주세요. 정말 황당하네요."},
+            {"role": "agent", "text": "고객님, 본인 확인부터 도와드리겠습니다. 가입하신 휴대폰 번호 뒷자리 4자리 부탁드립니다."},
+            {"role": "customer", "text": "지금 회의 들어가야 해서 본인인증을 못 하겠어요. 내일 오후 3시에 다시 전화 주실 수 있나요?"},
+            {"role": "agent", "text": "네, 010-0000-0000 으로 내일 15:00 콜백 예약 도와드릴게요. 본인인증은 그때 진행하시고, 결제 환불 건은 운영팀에 즉시 전달하겠습니다."},
+            {"role": "customer", "text": "환불 못 받으면 카드사 분쟁 신청할 거예요. 꼭 처리 부탁합니다."},
+            {"role": "agent", "text": "최우선으로 처리하겠습니다. 콜백 시간에 본인인증 + 환불 처리 결과 안내드리겠습니다."},
+        ],
+    },
+    "e2e-008": {
+        # 다중 row: VOC 두 종류 (배송 누락 + 가격 오안내) → 같은 action_type 두 번 propose 기대
+        "scenario": "multi_voc_row",
+        "caller_number": "010-0000-0000",
+        "branch_stats": {"faq": 0, "task": 0, "escalation": 1},
+        "transcripts": [
+            {"role": "customer", "text": "주문한 품목 중에 두 개나 누락돼서 왔어요. 박스 안에 영수증만 있고 실물이 없어요."},
+            {"role": "agent", "text": "정말 죄송합니다. 누락된 품목을 즉시 재발송 처리하겠습니다."},
+            {"role": "customer", "text": "그리고 또 하나, 결제 금액이 광고에서 본 가격이랑 다르게 청구됐어요. 광고는 5만원인데 7만원이 빠졌어요."},
+            {"role": "agent", "text": "두 건 모두 별도로 운영팀에 신고드리고 차액 환불 + 재발송 진행하겠습니다."},
+            {"role": "customer", "text": "두 건 다 정확히 처리해주세요. 한꺼번에 묶지 말고요."},
+            {"role": "agent", "text": "각각 별도 티켓으로 등록해서 처리 진행 상황 따로 안내드리겠습니다."},
+        ],
+    },
+    "e2e-009": {
+        # fail+auto 검증용 — angry+high 시나리오 (force_fail 스크립트로 retry max 도달 유도)
+        "scenario": "fail_then_auto_only",
+        "caller_number": "010-0000-0000",
+        "branch_stats": {"faq": 0, "task": 0, "escalation": 1},
+        "transcripts": [
+            {"role": "customer", "text": "이게 벌써 세 번째 전화인데 매번 다른 답변을 받네요. 정말 신뢰할 수가 없어요."},
+            {"role": "agent", "text": "죄송합니다. 이번에는 확실히 처리해드리겠습니다."},
+            {"role": "customer", "text": "지난번 상담에서는 환불된다고 했는데 이번엔 안 된다니, 회사 정책이 도대체 뭐예요?"},
+            {"role": "agent", "text": "내부 검토 후 정확한 답변을 다시 드리겠습니다."},
+            {"role": "customer", "text": "민원 넣을 거예요. 이거 녹음하고 있어요."},
+            {"role": "agent", "text": "팀장에게 즉시 보고드리겠습니다."},
+        ],
+    },
 }
 
 

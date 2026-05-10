@@ -26,11 +26,18 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def _notion_env_ready() -> bool:
-    """Notion env-based readiness — token + database id 둘 다 있을 때만 True."""
+def is_notion_ready() -> bool:
+    """Notion env-based readiness — token + database id 둘 다 있을 때만 True.
+
+    카탈로그 필터링 + analysis_planner._inject_mandatory_actions 둘 다 사용.
+    """
     token = (os.environ.get("NOTION_API_TOKEN") or "").strip()
     db_id = (os.environ.get("NOTION_DATABASE_ID") or "").strip()
     return bool(token) and bool(db_id)
+
+
+# 모듈 내부 backward-compat alias — 옛 호출자 보호
+_notion_env_ready = is_notion_ready
 
 
 _PROPOSE_CATALOG: list[dict[str, Any]] = [
@@ -163,82 +170,10 @@ _PROPOSE_CATALOG: list[dict[str, Any]] = [
         "tool": "gmail",
         "required_oauth": "gmail",
     },
-    {
-        "name": "propose_create_notion_call_record",
-        "description": (
-            "모든 통화의 기본 기록을 Notion DB 에 생성합니다. 통화 요약 / 감정 / "
-            "결과 상태 등 기본 메타데이터 row 1건. **모든 통화에 대해 기본 호출** — "
-            "단, 명백히 잡음 / 무음 / 잘못 걸린 전화 등 분석 가치가 없는 통화면 생략. "
-            "sentiment / priority 는 분석 결과를 그대로 복사해서 넣으세요."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Notion row 의 Name 컬럼 — 한 줄 요약 (50자 이내)",
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "통화 요약 본문 (Notion summary 컬럼)",
-                },
-                "sentiment": {
-                    "type": "string",
-                    "enum": ["positive", "neutral", "negative", "angry"],
-                    "description": "분석 결과의 customer_emotion 그대로",
-                },
-                "priority": {
-                    "type": "string",
-                    "enum": ["low", "medium", "high", "critical"],
-                    "description": "분석 결과의 priority_result.priority 그대로",
-                },
-            },
-            "required": ["title", "summary", "sentiment", "priority"],
-        },
-        "action_type": "create_notion_call_record",
-        "tool": "notion",
-        "required_oauth": None,
-        "requires_notion_env": True,
-    },
-    {
-        "name": "propose_create_notion_voc_record",
-        "description": (
-            "VOC 후속 처리 추적용 Notion DB row 별도 생성. customer_emotion 이 "
-            "angry / negative 이거나 priority 가 high / critical 인 경우에만 호출. "
-            "call_record 와 별도로 VOC 만 모아 보는 db 운영을 위함. "
-            "단순 inquiry / resolved 통화에는 호출 금지."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Notion row 의 Name 컬럼 — VOC 한 줄 요약",
-                },
-                "voc_content": {
-                    "type": "string",
-                    "description": "VOC 본문 (고객 불만 / 요청 사항 상세)",
-                },
-                "sentiment": {
-                    "type": "string",
-                    "enum": ["positive", "neutral", "negative", "angry"],
-                },
-                "priority": {
-                    "type": "string",
-                    "enum": ["low", "medium", "high", "critical"],
-                },
-                "suggested_action": {
-                    "type": "string",
-                    "description": "후속 권장 조치 (예: '환불 처리 후 24h 내 콜백')",
-                },
-            },
-            "required": ["title", "voc_content", "sentiment", "priority", "suggested_action"],
-        },
-        "action_type": "create_notion_voc_record",
-        "tool": "notion",
-        "required_oauth": None,
-        "requires_notion_env": True,
-    },
+    # NOTE: Notion call_record / voc_record 는 LLM 자율 도구가 아닌 자동 주입 액션.
+    # analysis_planner_agent_node._inject_mandatory_actions() 가 모든 통화에 대해
+    # call_record 를, angry+medium+ 조건에서 voc_record 를 무조건 propose 한다.
+    # → catalog 에 노출되지 않으므로 LLM 환각 / 누락 가능성 0.
     {
         "name": "propose_no_action",
         "description": (

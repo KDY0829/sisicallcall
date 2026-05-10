@@ -28,6 +28,7 @@ from app.agents.post_call.state import PostCallAgentState
 from app.agents.post_call.tools.action_catalog import (
     find_entry,
     get_action_catalog,
+    is_notion_ready,
     to_openai_tools,
 )
 from app.utils.logger import get_logger
@@ -37,7 +38,7 @@ logger = get_logger(__name__)
 # 테스트에서 monkeypatch 로 교체. POST_CALL_LLM_MODE=mock 일 때는 _MockPlannerLLM 사용.
 _llm: Any = None
 
-_MAX_TOOL_CALLS = 6
+_MAX_TOOL_CALLS = 8  # 다중 의도 통화 + retry feedback 케이스 대응 (이전 6 → 8)
 # V3-2: callback 허용 미래 범위 — task_branch_node connector 도 동일 정책
 _CALLBACK_MIN_OFFSET = timedelta(minutes=5)
 _CALLBACK_MAX_OFFSET = timedelta(days=90)
@@ -72,7 +73,10 @@ _SYSTEM_PROMPT_TEMPLATE = """당신은 콜센터 통화 분석 + 후속 액션 �
 2. 분석 결과는 반드시 record_analysis 도구를 한 번 호출하여 기록하세요.
 3. 분석 후 필요한 외부 액션이 있으면 propose_* 도구로 후보를 등록하세요.
    액션이 필요 없으면 propose_no_action 을 호출하세요.
-4. 도구 호출은 record_analysis + propose_* 합쳐서 최대 6개까지만.
+4. 도구 호출은 record_analysis + propose_* 합쳐서 최대 8개까지만.
+
+(참고: Notion 통화 기록 / VOC 기록은 별도 자동 액션으로 시스템이 항상 처리한다 —
+ propose 대상이 아니다. 카탈로그에서 빠져 있어도 정상.)
 
 [시각 처리 — 매우 중요]
 - propose_schedule_callback.preferred_time 은 반드시 위 [현재 시각] 기준으로 계산한
@@ -81,33 +85,35 @@ _SYSTEM_PROMPT_TEMPLATE = """당신은 콜센터 통화 분석 + 후속 액션 �
 - "내일 오후 3시" → [현재 시각] 의 다음 날짜 + "15:00" 으로 계산.
 - transcript 에 시각 표현이 없거나 모호하면 빈 문자열로.
 
+[다중 의도 — 매우 중요]
+한 통화에 여러 의도가 동시에 있을 수 있다.
+예: "환불 요청(불만) + 내일 오후 3시 콜백 + 본인인증 필요" →
+    propose_send_email_supervisor + propose_schedule_callback + propose_create_jira_ticket
+    세 개 모두 호출.
+같은 action_type 도 의도가 다르면 여러 번 호출 가능 (예: VOC 두 종류 — 불만 + 환불 →
+propose_send_sms_followup 두 번 또는 propose_create_jira_ticket 두 번).
+- 다른 의도면: 두 호출의 params 를 각 의도에 맞게 다르게 채워서 둘 다 호출.
+- 동일한 내용 (params 가 사실상 같음) 이면: 한 번만. 중복 호출 금지.
+
 [액션 선택 가이드 — 각 항목은 독립적으로 평가하고 해당하면 모두 호출]
 
-항상 평가해야 할 도구들 (조건 충족 시 한 번씩 호출, 누락 금지):
+A. 단순 콜백 요청 → propose_schedule_callback
 
-A. **모든 통화 (잡음/무음 제외)** → propose_create_notion_call_record 호출.
-   Notion DB 에 기본 row 1건. 카탈로그에 없으면 Notion 미연결이라 생략.
-
-B. 단순 콜백 요청 → propose_schedule_callback
-
-C. 강한 불만 (angry / negative) + 에스컬레이션 (escalated / abandoned) →
+B. 강한 불만 (angry / negative) + 에스컬레이션 (escalated / abandoned) →
    - propose_send_slack_alert (필수)
    - propose_create_jira_ticket (필수)
 
-D. **angry / negative emotion 또는 priority 가 high / critical** →
-   - propose_create_notion_voc_record 추가 (call_record 와 별도)
-   - 단순 inquiry / resolved 통화에는 VOC record 호출 금지
-
-E. **angry emotion 또는 priority 가 high / critical** →
+C. **angry emotion 또는 priority 가 high / critical** →
    - propose_send_email_supervisor 호출 (supervisor 알림)
    - critical 만이 아닌 high / angry 도 포함
 
-F. 단순 정보 문의 / 해결된 통화 (action_required=false) → propose_no_action
+D. 단순 정보 문의 / 해결된 통화 (action_required=false) → propose_no_action
 
 [조합 예시]
-- angry + escalated + high : A(notion call) + C(slack+jira) + D(notion voc) + E(email) → 5개 호출
-- neutral + resolved + low : A(notion call) + F(no action) → 2개 호출
-- neutral + 콜백 요청 : A(notion call) + B(callback) → 2개 호출
+- angry + escalated + high : B(slack+jira) + C(email) → 3개 호출
+- neutral + 콜백 요청 : A(callback) → 1개 호출
+- 다중 의도 (환불+콜백+인증) : A + B + C 모두 + 추가 jira → 5개+ 호출
+  (Notion 기록은 자동 처리됨 — 호출 불필요)
 
 카탈로그에 없는 도구는 호출 금지. (없으면 그 액션은 propose 하지 않는다.)
 
@@ -311,36 +317,134 @@ def _propose_to_planned_action(
             "subject": args.get("subject", ""),
             "body": args.get("body", ""),
         })
-    elif name == "propose_create_notion_call_record":
-        base_params.update({
-            "title": args.get("title", ""),
-            "summary_short": args.get("title", ""),  # Notion connector 호환
-            "summary": args.get("summary", ""),
-            "customer_emotion": args.get("sentiment", "neutral"),
-            "priority": args.get("priority", "low"),
-        })
-    elif name == "propose_create_notion_voc_record":
-        base_params.update({
-            "title": args.get("title", ""),
-            "summary_short": args.get("title", ""),
-            "voc_content": args.get("voc_content", ""),
-            "summary": args.get("voc_content", ""),
-            "customer_emotion": args.get("sentiment", "neutral"),
-            "priority": args.get("priority", "low"),
-            "suggested_action": args.get("suggested_action", ""),
-        })
+    # NOTE: Notion (call_record / voc_record) 는 자동 주입 액션이라 카탈로그에서 제거됨.
+    # _inject_mandatory_actions() 가 별도 처리.
 
-    return (
-        {
-            "action_type": action_type,
-            "tool": tool_name,
-            "priority": priority,  # 단일 source — analysis 의 priority_result.priority
-            "params": base_params,
-            "status": "pending",
-            "proposed_by": "analysis_planner_agent",
-        },
-        violation,
+    action = {
+        "action_type": action_type,
+        "tool": tool_name,
+        "priority": priority,  # 단일 source — analysis 의 priority_result.priority
+        "params": base_params,
+        "status": "pending",
+        "proposed_by": "analysis_planner_agent",
+    }
+    action["idempotency_token"] = _compute_idempotency_token(action)
+    return action, violation
+
+
+# ── Idempotency token — 동일 의도 두 번째 호출 차단 / 다른 의도는 별개 ─────
+import hashlib  # noqa: E402
+import json as _json  # noqa: E402
+
+_IDEMPOTENCY_FIELDS = {
+    "send_voc_receipt_sms": ["customer_phone", "message"],
+    "create_jira_issue": ["summary"],
+    "schedule_callback": ["preferred_time"],
+    "send_slack_alert": ["message"],
+    "send_manager_email": ["subject"],
+    "send_callback_sms": ["customer_phone"],
+    "create_voc_issue": ["voc_content"],
+    # auto_injected 는 sub_intent 마커로 처리 (아래 분기)
+    "create_notion_call_record": [],
+    "create_notion_voc_record": ["voc_content"],
+}
+
+
+def _compute_idempotency_token(action: dict) -> str:
+    """결정론적 idempotency token. 같은 의도 → 같은 token, 다른 의도 → 다른 token.
+
+    auto_injected 액션은 (sub_intent 마커 + 통화당 1건) 로 단순화.
+    LLM-proposed 는 action_type 별 핵심 field hash.
+    """
+    params = action.get("params") or {}
+    if params.get("auto_injected"):
+        sub = str(params.get("sub_intent") or "auto").strip() or "auto"
+        return f"auto:{sub}"
+    action_type = action.get("action_type") or ""
+    fields = _IDEMPOTENCY_FIELDS.get(action_type, [])
+    payload = {k: params.get(k) for k in fields}
+    raw = _json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+# ── 자동 주입 액션 (Notion 회사 DB 기록) ──────────────────────────────────────
+# Notion DB 를 회사 DB 로 가정. 모든 통화 → call_record. angry+medium+ → voc_record.
+# LLM 자율 판단 대상 아님. retry 사이클에서 매번 재실행되지만 idempotency_token 으로
+# executor 가 첫 시도 후 skip. fail (max retry 초과) 시에도 auto_action_executor 가 발송.
+
+def _inject_mandatory_actions(
+    *,
+    tenant_id: str,
+    call_id: str,
+    analysis: dict,
+    priority: str,
+    proposed: list[dict],
+) -> list[dict]:
+    """카탈로그 외부의 자동 액션을 proposed_actions 끝에 append.
+
+    Notion 미연결 (token/db id 없음) → 자동 액션 0건. graceful skip.
+    """
+    if not is_notion_ready():
+        return proposed
+
+    summary_dict = (analysis or {}).get("summary") or {}
+    summary_short = str(summary_dict.get("summary_short") or "")[:80]
+    summary_detailed = str(
+        summary_dict.get("summary_detailed") or summary_short or ""
     )
+    sentiment = str(summary_dict.get("customer_emotion") or "neutral")
+    handoff_notes = str(summary_dict.get("handoff_notes") or "")
+
+    out = list(proposed)
+
+    # 1. call_record — 모든 통화 무조건 (idempotency: auto:auto_call_record)
+    call_record = {
+        "action_type": "create_notion_call_record",
+        "tool": "notion",
+        "priority": priority,
+        "params": {
+            "call_id": call_id,
+            "tenant_id": tenant_id,
+            "title": summary_short or "통화 기록",
+            "summary_short": summary_short or "통화 기록",
+            "summary": summary_detailed,
+            "customer_emotion": sentiment,
+            "priority": priority,
+            "auto_injected": True,
+            "sub_intent": "auto_call_record",
+        },
+        "status": "pending",
+        "proposed_by": "auto_inject",
+    }
+    call_record["idempotency_token"] = _compute_idempotency_token(call_record)
+    out.append(call_record)
+
+    # 2. voc_record — 조건부 (angry/negative + medium+ priority)
+    if sentiment in ("angry", "negative") and priority in ("medium", "high", "critical"):
+        voc_record = {
+            "action_type": "create_notion_voc_record",
+            "tool": "notion",
+            "priority": priority,
+            "params": {
+                "call_id": call_id,
+                "tenant_id": tenant_id,
+                "title": summary_short or "VOC",
+                "summary_short": summary_short or "VOC",
+                "voc_content": summary_detailed,
+                "summary": summary_detailed,
+                "customer_emotion": sentiment,
+                "priority": priority,
+                "suggested_action": handoff_notes,
+                "auto_injected": True,
+                "sub_intent": "auto_voc_record",
+            },
+            "status": "pending",
+            "proposed_by": "auto_inject",
+        }
+        voc_record["idempotency_token"] = _compute_idempotency_token(voc_record)
+        out.append(voc_record)
+
+    return out
 
 
 def _post_call_llm_mode() -> str:
@@ -420,18 +524,8 @@ class _MockPlannerLLM:
             },
         })
 
-        # Notion call_record: 모든 통화 기본 (카탈로그에 있을 때만)
-        if "propose_create_notion_call_record" in available_names:
-            calls.append({
-                "id": "call_notion_call",
-                "name": "propose_create_notion_call_record",
-                "arguments": {
-                    "title": "[MOCK] 통화 기본 기록",
-                    "summary": "[MOCK] 결정론적 mock 응답",
-                    "sentiment": emotion,
-                    "priority": priority,
-                },
-            })
+        # NOTE: Notion (call_record / voc_record) 는 자동 주입 액션이라 mock 에서도 호출 안 함.
+        #       _inject_mandatory_actions() 가 catalog 외부에서 추가.
 
         if action_required:
             if "propose_send_slack_alert" in available_names:
@@ -461,20 +555,6 @@ class _MockPlannerLLM:
                     "arguments": {
                         "summary": "[MOCK] 후속 처리 필요",
                         "description": "[MOCK] 자동 생성된 mock 이슈",
-                    },
-                })
-            # Notion voc_record: angry/negative emotion 또는 high+ priority
-            if (is_angry or emotion in ("angry", "negative") or priority in ("high", "critical")) and \
-                    "propose_create_notion_voc_record" in available_names:
-                calls.append({
-                    "id": "call_notion_voc",
-                    "name": "propose_create_notion_voc_record",
-                    "arguments": {
-                        "title": "[MOCK] VOC 기록",
-                        "voc_content": "[MOCK] 강한 불만 / 후속 처리 필요",
-                        "sentiment": emotion,
-                        "priority": priority,
-                        "suggested_action": "[MOCK] 환불 처리 + 24h 콜백",
                     },
                 })
         else:
@@ -695,7 +775,22 @@ async def analysis_planner_agent_node(state: PostCallAgentState) -> dict:
         analysis = _empty_analysis("record_analysis 누락 — fallback")
         # priority 가 low fallback 이므로 propose 했던 액션들의 우선순위 재정렬 안 함
 
-    # propose_no_action + 다른 propose 가 동시에 오면 propose_* 우선
+    # ── 자동 액션 주입 (Notion 회사 DB 기록 — LLM 자율 판단 대상 아님) ────────
+    proposed = _inject_mandatory_actions(
+        tenant_id=tenant_id,
+        call_id=call_id,
+        analysis=analysis,
+        priority=priority,
+        proposed=proposed,
+    )
+    auto_injected_count = sum(
+        1 for a in proposed if (a.get("params") or {}).get("auto_injected")
+    )
+    if auto_injected_count:
+        rationale_parts.append(f"auto_injected={auto_injected_count}")
+
+    # propose_no_action + 다른 propose 가 동시에 오면 propose_* 우선.
+    # auto_injected 도 propose 로 카운트한다 (Notion 자동 액션 = '액션 있음').
     if no_action_seen and proposed:
         rationale_parts.append("propose_no_action 무시 — 다른 propose 함께 호출됨")
 
@@ -717,6 +812,7 @@ async def analysis_planner_agent_node(state: PostCallAgentState) -> dict:
         "tool_counts": tool_counts,
         "latency_ms": latency_ms,
         "retry_count": retry_count,
+        "auto_injected_count": auto_injected_count,
     }
 
     logger.info(

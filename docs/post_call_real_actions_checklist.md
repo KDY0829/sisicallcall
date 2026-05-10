@@ -193,7 +193,8 @@ TOKEN_ENCRYPTION_KEY=<Fernet key>
 # Post-call 연동 정책 (확인됨)
 MCP_USE_TENANT_OAUTH=true            # tenant OAuth 우선
 MCP_ALLOW_ENV_FALLBACK=false         # tenant 미연결 시 .env로 폴백 허용 여부
-MCP_ACTION_LOG_STORE=db              # mcp_action_logs Postgres 저장
+# mcp_action_logs 저장소 — Postgres mcp_action_logs 테이블 사용 (db-only).
+# 별도 storage 환경변수 없음. settings.database_url 만 유효하면 된다.
 
 # Post-call LLM
 POST_CALL_LLM_MODE=mock              # mock | real
@@ -359,9 +360,8 @@ python scripts/check_post_call_integrations.py --all-tenants
 [ ] tenant_id가 calls 테이블의 실제 tenant인지 확인
 [ ] completed call + transcripts (>0 rows) 존재 확인
 [ ] OPENAI_API_KEY 설정 (real LLM 사용 시) 또는 mock 모드
-[ ] MCP_ACTION_LOG_STORE=db 설정
 [ ] TOKEN_ENCRYPTION_KEY 설정 (OAuth provider 사용 시)
-[ ] DATABASE_URL / settings.database_url 이 유효한 Postgres 가리키는지 확인 (tenant_integrations 테이블 db-only)
+[ ] DATABASE_URL / settings.database_url 이 유효한 Postgres 가리키는지 확인 (tenant_integrations / mcp_action_logs 모두 db-only)
 [ ] MCP_USE_TENANT_OAUTH=true (tenant OAuth 사용 시)
 [ ] MCP_ALLOW_ENV_FALLBACK 정책 결정 (true면 tenant 미연결 시 env 폴백)
 [ ] 사용할 provider 별 *_MCP_REAL=true 설정
