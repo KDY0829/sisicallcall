@@ -1,10 +1,9 @@
 import uuid
 from datetime import datetime, timezone
 
-import redis.asyncio as aioredis
-
 from app.utils.config import settings
 from app.utils.logger import get_logger
+from app.services.cache.kv import get_kv
 
 logger = get_logger(__name__)
 
@@ -23,7 +22,12 @@ class OCRSessionService:
     """
 
     def __init__(self) -> None:
-        self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+        self._redis = None
+
+    async def _kv(self):
+        if self._redis is None:
+            self._redis = await get_kv()
+        return self._redis
 
     async def create_session(
         self,
@@ -39,7 +43,8 @@ class OCRSessionService:
         """
         ocr_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        await self._redis.hset(_key(ocr_id), mapping={
+        kv = await self._kv()
+        await kv.hset(_key(ocr_id), mapping={
             "ocr_id": ocr_id,
             "tenant_id": tenant_id,
             "customer_phone": customer_phone,
@@ -49,21 +54,31 @@ class OCRSessionService:
             "extracted_text": "",
             "created_at": now,
         })
-        await self._redis.expire(_key(ocr_id), _OCR_SESSION_TTL)
+        await kv.expire(_key(ocr_id), _OCR_SESSION_TTL)
         logger.info("ocr session 생성 ocr_id=%s tenant=%s doc_type=%s", ocr_id, tenant_id, doc_type)
         return ocr_id
 
     async def get_session(self, ocr_id: str) -> dict | None:
-        data = await self._redis.hgetall(_key(ocr_id))
+        kv = await self._kv()
+        data = await kv.hgetall(_key(ocr_id))
         return data if data else None
 
     async def set_extracting(self, ocr_id: str) -> None:
-        await self._redis.hset(_key(ocr_id), "status", "extracting")
+        kv = await self._kv()
+        await kv.hset(_key(ocr_id), mapping={"status": "extracting"})
 
-    async def set_extracted(self, ocr_id: str, extracted_text: str) -> None:
-        await self._redis.hset(_key(ocr_id), mapping={
+    async def set_extracted(
+        self,
+        ocr_id: str,
+        extracted_text: str,
+        parsed_fields: str = "",
+    ) -> None:
+        """extracted_text: 원시 추출 텍스트, parsed_fields: JSON 직렬화된 구조화 필드."""
+        kv = await self._kv()
+        await kv.hset(_key(ocr_id), mapping={
             "status": "extracted",
             "extracted_text": extracted_text,
+            "parsed_fields": parsed_fields,
         })
         logger.info("ocr extracted ocr_id=%s chars=%d", ocr_id, len(extracted_text))
 
@@ -71,5 +86,6 @@ class OCRSessionService:
         mapping: dict = {"status": "failed"}
         if reason:
             mapping["fail_reason"] = reason
-        await self._redis.hset(_key(ocr_id), mapping=mapping)
+        kv = await self._kv()
+        await kv.hset(_key(ocr_id), mapping=mapping)
         logger.warning("ocr failed ocr_id=%s reason=%s", ocr_id, reason)

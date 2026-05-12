@@ -1,9 +1,14 @@
+import dataclasses
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.repositories.ocr_audit_log_repo import insert_ocr_audit_log
+from app.services.ocr.base import BaseOCRService
+from app.services.ocr.id_card import IDCardOCRService
+from app.services.ocr.id_card_parser import IDCardFields, parse_id_card_fields
 from app.services.ocr.session import OCRSessionService
 from app.services.ocr.tesseract import TesseractOCRService
 from app.utils.config import settings
@@ -14,7 +19,15 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 _session_svc = OCRSessionService()
-_ocr_svc = TesseractOCRService()
+_default_ocr_svc: BaseOCRService = TesseractOCRService()
+_id_card_ocr_svc: BaseOCRService = IDCardOCRService()
+
+
+def _get_ocr_service(doc_type: str) -> BaseOCRService:
+    """doc_type에 따라 적합한 OCR 서비스 반환."""
+    if doc_type == "id_card":
+        return _id_card_ocr_svc
+    return _default_ocr_svc
 
 _OCR_PAGE_HTML = (
     Path(__file__).parent.parent.parent / "static" / "ocr_upload.html"
@@ -28,8 +41,16 @@ async def _run_extraction(ocr_id: str, image_bytes: bytes) -> None:
     tenant_id = (session or {}).get("tenant_id", "")
     doc_type  = (session or {}).get("doc_type", "general")
     try:
-        extracted_text = await _ocr_svc.extract_text(image_bytes)
-        await _session_svc.set_extracted(ocr_id, extracted_text)
+        ocr_service = _get_ocr_service(doc_type)
+        extracted_text = await ocr_service.extract_text(image_bytes)
+
+        parsed_fields_json = ""
+        if doc_type == "id_card":
+            fields: IDCardFields = parse_id_card_fields(extracted_text)
+            parsed_fields_json = json.dumps(dataclasses.asdict(fields), ensure_ascii=False)
+            logger.info("id_card parsed name=%s ocr_id=%s", fields.name, ocr_id)
+
+        await _session_svc.set_extracted(ocr_id, extracted_text, parsed_fields_json)
         await insert_ocr_audit_log(
             ocr_id=ocr_id,
             call_id=call_id,
@@ -82,15 +103,19 @@ async def get_ocr_status(ocr_id: str):
 
 
 @router.get("/dev/test-session", include_in_schema=False)
-async def dev_test_session():
-    """개발 환경 전용 — 테스트용 OCR 세션 생성 후 업로드 페이지로 리다이렉트."""
+async def dev_test_session(doc_type: str = "general"):
+    """개발 환경 전용 — 테스트용 OCR 세션 생성 후 업로드 페이지로 리다이렉트.
+
+    ?doc_type=id_card  → 신분증 OCR 파이프라인 테스트
+    ?doc_type=general  → 기본 Tesseract OCR 테스트 (기본값)
+    """
     if settings.env != "development":
         raise HTTPException(status_code=404, detail="Not found")
     ocr_id = await _session_svc.create_session(
         tenant_id="dev-tenant",
         customer_phone="010-0000-0000",
         call_id="dev-call",
-        doc_type="general",
+        doc_type=doc_type,
     )
     return RedirectResponse(url=f"/ocr/{ocr_id}")
 

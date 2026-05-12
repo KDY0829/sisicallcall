@@ -53,8 +53,8 @@
   <!-- 2. 업로드 UI (세션 유효 시 표시) -->
   <div id="upload-section" style="display:none">
     <div class="step active" id="step1">
-      <div class="step-title">문서 사진 선택 <span class="badge" id="b1">대기</span></div>
-      <p class="guide">처방전, 신분증, 영수증 등 텍스트가 있는 문서를 촬영하거나 갤러리에서 선택해주세요.</p>
+      <div class="step-title" id="upload-title">문서 사진 선택 <span class="badge" id="b1">대기</span></div>
+      <p class="guide" id="upload-guide">처방전, 신분증, 영수증 등 텍스트가 있는 문서를 촬영하거나 갤러리에서 선택해주세요.</p>
       <div class="file-row">
         <label for="cam">📷 카메라</label>
         <label for="gal">🖼 갤러리</label>
@@ -62,7 +62,7 @@
       <input type="file" id="cam" accept="image/*" capture="environment" onchange="previewFile(this)">
       <input type="file" id="gal" accept="image/*" onchange="previewFile(this)">
       <img id="preview" class="preview" style="display:none" alt="">
-      <p class="tip">💡 문서 전체가 화면에 들어오도록 정면에서 찍어주세요.</p>
+      <p class="tip" id="upload-tip">💡 문서 전체가 화면에 들어오도록 정면에서 찍어주세요.</p>
       <button class="btn-primary" id="btn-upload" onclick="uploadImage()" disabled>텍스트 추출하기</button>
     </div>
   </div>
@@ -138,6 +138,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     // pending | extracting — 정상 진입
     showSection('upload-section');
     setStatus('사진을 선택해주세요.');
+    if (data.doc_type === 'id_card') {
+      document.getElementById('upload-title').childNodes[0].textContent = '신분증 사진 선택 ';
+      document.getElementById('upload-guide').textContent = '주민등록증 또는 운전면허증을 촬영하거나 갤러리에서 선택해주세요.';
+      document.getElementById('upload-tip').textContent = '💡 신분증 전체가 선명하게 찍히도록 정면에서 촬영해주세요. 빛 반사에 주의하세요.';
+      document.getElementById('btn-upload').textContent = '신분증 인식하기';
+    }
   } catch(e) {
     showExpired('서버 연결에 실패했어요.');
   }

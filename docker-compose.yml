@@ -65,7 +65,7 @@ services:
   # 호스트 포트 8001 → 컨테이너 내부 8000 (FastAPI 8000 충돌 회피)
   # ----------------------------------------------------------------------------
   chromadb:
-    image: chromadb/chroma:0.5.23
+    image: chromadb/chroma:0.6.3
     container_name: sisicallcall-chromadb
     ports:
       - "${CHROMA_PORT:-8001}:8000"

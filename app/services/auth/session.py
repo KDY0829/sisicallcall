@@ -1,11 +1,10 @@
 import uuid
 from datetime import datetime, timezone
 
-import redis.asyncio as aioredis
-
 from app.services.auth.events import publish_auth_event
 from app.utils.config import settings
 from app.utils.logger import get_logger
+from app.services.cache.kv import get_kv
 
 logger = get_logger(__name__)
 
@@ -18,7 +17,12 @@ def _key(auth_id: str) -> str:
 
 class AuthSessionService:
     def __init__(self) -> None:
-        self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+        self._redis = None
+
+    async def _kv(self):
+        if self._redis is None:
+            self._redis = await get_kv()
+        return self._redis
 
     async def create_session(
         self,
@@ -30,7 +34,8 @@ class AuthSessionService:
     ) -> str:
         auth_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        await self._redis.hset(_key(auth_id), mapping={
+        kv = await self._kv()
+        await kv.hset(_key(auth_id), mapping={
             "auth_id": auth_id,
             "tenant_id": tenant_id,
             "customer_ref": customer_ref,
@@ -42,29 +47,33 @@ class AuthSessionService:
             "face_attempts": "0",
             "created_at": now,
         })
-        await self._redis.expire(_key(auth_id), _AUTH_SESSION_TTL)
+        await kv.expire(_key(auth_id), _AUTH_SESSION_TTL)
         logger.info("auth session 생성 auth_id=%s tenant=%s", auth_id, tenant_id)
         return auth_id
 
     async def get_session(self, auth_id: str) -> dict | None:
-        data = await self._redis.hgetall(_key(auth_id))
+        kv = await self._kv()
+        data = await kv.hgetall(_key(auth_id))
         return data if data else None
 
     async def update_status(self, auth_id: str, status: str) -> None:
-        await self._redis.hset(_key(auth_id), "status", status)
+        kv = await self._kv()
+        await kv.hset(_key(auth_id), mapping={"status": status})
 
     async def set_liveness_passed(self, auth_id: str) -> None:
-        await self._redis.hset(_key(auth_id), mapping={
+        kv = await self._kv()
+        await kv.hset(_key(auth_id), mapping={
             "liveness_passed": "true",
             "status": "liveness_passed",
         })
 
     async def increment_face_attempts(self, auth_id: str) -> int:
-        return await self._redis.hincrby(_key(auth_id), "face_attempts", 1)
+        kv = await self._kv()
+        return await kv.hincrby(_key(auth_id), "face_attempts", 1)
 
     async def set_face_verified(self, auth_id: str) -> None:
-        # 1단계 인증 — face 통과 = verified.
-        await self._redis.hset(_key(auth_id), mapping={
+        kv = await self._kv()
+        await kv.hset(_key(auth_id), mapping={
             "face_verified": "true",
             "status": "verified",
         })
@@ -72,5 +81,6 @@ class AuthSessionService:
         await publish_auth_event(auth_id, "verified")
 
     async def set_blocked(self, auth_id: str) -> None:
-        await self._redis.hset(_key(auth_id), "status", "blocked")
+        kv = await self._kv()
+        await kv.hset(_key(auth_id), mapping={"status": "blocked"})
         await publish_auth_event(auth_id, "blocked")

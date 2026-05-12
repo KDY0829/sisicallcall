@@ -19,6 +19,11 @@ _logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.startup_profile.lower() == "lite":
+        _logger.warning("startup: STARTUP_PROFILE=lite — skipping warmups/prewarm (local boot mode)")
+        yield
+        return
+
     _logger.info("startup: loading embedding model (provider=%s)...", settings.embedding_provider)
     get_embedder()
     _logger.info("startup: embedding model ready")

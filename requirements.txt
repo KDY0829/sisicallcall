@@ -4,7 +4,7 @@ fastapi==0.115.0
 # Router(on_startup=...) 가 깨짐. fastapi 호환 범위로 강제. sse-starlette metadata 경고는
 # 런타임 무관 (mcp 가 stdio transport 만 사용).
 starlette>=0.37.2,<0.39
-uvicorn[standard]==0.30.6
+uvicorn[standard]>=0.31.1,<0.35
 websockets==13.1
 
 # Twilio
@@ -35,8 +35,8 @@ azure-cognitiveservices-speech==1.40.0
 
 # Speaker Verification — TitaNet-L ONNX (onnxruntime 은 ArcFace 와 공유, 아래 ArcFace 섹션 참조)
 
-# Embedding / Vector DB
-chromadb==0.5.23
+# Embedding / Vector DB (0.6+ : tokenizers 상한 제거 — transformers/sentence-transformers 와 공존)
+chromadb==0.6.3
 
 # Database
 asyncpg==0.29.0

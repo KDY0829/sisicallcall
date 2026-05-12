@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # App
     env: str = "development"
     log_level: str = "INFO"
+    # startup_profile:
+    # - "full": 운영에 가까운 워밍/프리로드 수행 (기본)
+    # - "lite": 로컬에서 외부 의존(Postgres/Redis/Chroma/모델) 없이도 서버를 '기동'할 수 있게
+    #          워밍 단계를 모두 건너뜀 (실사용 기능은 제한됨)
+    startup_profile: str = "full"
 
     # Admin JWT
     jwt_secret_key: str = "change-me"

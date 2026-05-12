@@ -1,9 +1,8 @@
 import json
 import time
 
-import redis.asyncio as redis
-
 from app.utils.config import settings
+from app.services.cache.kv import get_kv
 
 _TTL_SECONDS = 3600  # 1시간 후 세션 자동 만료
 
@@ -22,14 +21,20 @@ class RedisSessionService:
     """
 
     def __init__(self):
-        self._client = redis.from_url(settings.redis_url, decode_responses=True)
+        self._client = None
 
     def _key(self, call_id: str) -> str:
         return f"session:{call_id}"
 
+    async def _kv(self):
+        if self._client is None:
+            self._client = await get_kv()
+        return self._client
+
     async def load(self, call_id: str) -> dict:
         """세션 view 로드. 없으면 빈 구조 반환."""
-        data = await self._client.get(self._key(call_id))
+        kv = await self._kv()
+        data = await kv.get(self._key(call_id))
         if data:
             return json.loads(data)
         return {"conversation_history": []}
@@ -41,7 +46,8 @@ class RedisSessionService:
         ts = time.time()
         history.append({"role": "user", "text": user_text, "ts": ts})
         history.append({"role": "assistant", "text": response_text, "ts": ts})
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key(call_id),
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
@@ -49,13 +55,15 @@ class RedisSessionService:
 
     async def clear(self, call_id: str) -> None:
         """통화 종료 시 세션 삭제."""
-        await self._client.delete(self._key(call_id))
+        kv = await self._kv()
+        await kv.delete(self._key(call_id))
 
     async def set_auth_id(self, call_id: str, auth_id: str) -> None:
         """auth_branch 가 SMS 발송 후 통화 세션에 auth_id 기록 — 재진입 시 폴링용."""
         view = await self.load(call_id)
         view["auth_id"] = auth_id
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key(call_id),
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
@@ -72,7 +80,8 @@ class RedisSessionService:
         """
         view = await self.load(call_id)
         view["pending_task"] = task
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key(call_id),
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
@@ -87,7 +96,8 @@ class RedisSessionService:
         if "pending_task" not in view:
             return
         del view["pending_task"]
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key(call_id),
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
@@ -97,7 +107,8 @@ class RedisSessionService:
         """vision_branch 가 SMS 발송 후 통화 세션에 vision_id 기록 — 재진입 시 폴링용."""
         view = await self.load(call_id)
         view["vision_id"] = vision_id
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key(call_id),
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
@@ -113,7 +124,8 @@ class RedisSessionService:
         if "vision_id" not in view:
             return
         del view["vision_id"]
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key(call_id),
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
@@ -123,7 +135,8 @@ class RedisSessionService:
         """ocr_branch 가 SMS 발송 후 통화 세션에 ocr_id 기록 — 재진입 시 폴링용."""
         view = await self.load(call_id)
         view["ocr_id"] = ocr_id
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key(call_id),
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
@@ -139,7 +152,8 @@ class RedisSessionService:
         if "ocr_id" not in view:
             return
         del view["ocr_id"]
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key(call_id),
             json.dumps(view, ensure_ascii=False),
             ex=_TTL_SECONDS,
@@ -155,14 +169,16 @@ class RedisSessionService:
 
         TTL 없음 — 다음 재인덱싱이 덮어쓰며 갱신. admin UI Layer 1 노출용.
         """
-        await self._client.set(
+        kv = await self._kv()
+        await kv.set(
             self._key_rag_categories(tenant_id),
             json.dumps(categories, ensure_ascii=False),
         )
 
     async def get_rag_categories(self, tenant_id: str) -> list[str]:
         """tenant 의 안내 가능 카테고리 조회. 미설정 시 빈 list."""
-        data = await self._client.get(self._key_rag_categories(tenant_id))
+        kv = await self._kv()
+        data = await kv.get(self._key_rag_categories(tenant_id))
         if not data:
             return []
         try:

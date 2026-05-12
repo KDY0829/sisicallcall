@@ -16,7 +16,27 @@ class ChromaRAGService(BaseRAGService):
     def _get_client(self):
         if self._client is None:
             import chromadb
-            self._client = chromadb.HttpClient(host=self._host, port=self._port)
+            # Docker/로컬 ChromaDB 가 없을 수도 있으므로:
+            # 1) HTTP 서버 모드(기존) 우선 시도
+            # 2) 실패 시 로컬 persistent 모드로 fallback (SQLite/duckdb 내부 저장)
+            try:
+                http = chromadb.HttpClient(host=self._host, port=self._port)
+                # heartbeat: 연결 검증. 실패하면 except 로 fallback.
+                http.heartbeat()
+                self._client = http
+            except Exception as e:
+                from pathlib import Path
+
+                local_dir = Path(".local") / "chroma"
+                local_dir.mkdir(parents=True, exist_ok=True)
+                logger.warning(
+                    "ChromaDB HTTP unavailable (%s:%s) — using local persistent client at %s (%s)",
+                    self._host,
+                    self._port,
+                    str(local_dir),
+                    e,
+                )
+                self._client = chromadb.PersistentClient(path=str(local_dir))
         return self._client
 
     def _collection_name(self, tenant_id: str) -> str:

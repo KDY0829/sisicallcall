@@ -119,10 +119,110 @@ def _redis_is_configured() -> bool:
     return parsed.scheme in {"redis", "rediss"}
 
 
+def _is_redis_conn_error(e: Exception) -> bool:
+    try:
+        import redis.exceptions
+        return isinstance(e, (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError))
+    except ImportError:
+        return False
+
+
+class _RedisWithFallback(KVStore):
+    """Redis 연결이 끊기면 MemoryKV로 자동 전환하는 래퍼.
+
+    ping은 성공했으나 실제 operation에서 연결이 끊길 때를 처리.
+    전환 후 _kv_singleton도 MemoryKV로 교체해 새 인스턴스도 fallback을 받는다.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self._mem = MemoryKV()
+        self._down = False
+
+    def _fail(self, e: Exception) -> MemoryKV:
+        global _kv_singleton
+        if not self._down:
+            logger.warning("KV: Redis 연결 끊김 → in-memory fallback (%s)", e)
+            self._down = True
+            _kv_singleton = self._mem
+        return self._mem
+
+    async def get(self, key: str) -> str | None:
+        if self._down:
+            return await self._mem.get(key)
+        try:
+            return await self._client.get(key)
+        except Exception as e:
+            if _is_redis_conn_error(e):
+                return await self._fail(e).get(key)
+            raise
+
+    async def set(self, key: str, value: str, *, ex: int | None = None) -> None:
+        if self._down:
+            return await self._mem.set(key, value, ex=ex)
+        try:
+            await self._client.set(key, value, ex=ex)
+        except Exception as e:
+            if _is_redis_conn_error(e):
+                return await self._fail(e).set(key, value, ex=ex)
+            raise
+
+    async def delete(self, key: str) -> None:
+        if self._down:
+            return await self._mem.delete(key)
+        try:
+            await self._client.delete(key)
+        except Exception as e:
+            if _is_redis_conn_error(e):
+                return await self._fail(e).delete(key)
+            raise
+
+    async def hset(self, key: str, mapping: Mapping[str, str]) -> None:
+        if self._down:
+            return await self._mem.hset(key, mapping)
+        try:
+            await self._client.hset(key, mapping=mapping)
+        except Exception as e:
+            if _is_redis_conn_error(e):
+                return await self._fail(e).hset(key, mapping)
+            raise
+
+    async def hgetall(self, key: str) -> dict[str, str]:
+        if self._down:
+            return await self._mem.hgetall(key)
+        try:
+            return await self._client.hgetall(key)
+        except Exception as e:
+            if _is_redis_conn_error(e):
+                return await self._fail(e).hgetall(key)
+            raise
+
+    async def hincrby(self, key: str, field: str, amount: int) -> int:
+        if self._down:
+            return await self._mem.hincrby(key, field, amount)
+        try:
+            return await self._client.hincrby(key, field, amount)
+        except Exception as e:
+            if _is_redis_conn_error(e):
+                return await self._fail(e).hincrby(key, field, amount)
+            raise
+
+    async def expire(self, key: str, ttl_seconds: int) -> None:
+        if self._down:
+            return await self._mem.expire(key, ttl_seconds)
+        try:
+            await self._client.expire(key, ttl_seconds)
+        except Exception as e:
+            if _is_redis_conn_error(e):
+                return await self._fail(e).expire(key, ttl_seconds)
+            raise
+
+
 async def get_kv() -> KVStore:
     """Redis가 있으면 Redis를, 없으면 MemoryKV를 반환.
 
     동시 첫 호출은 Lock으로 직렬화해 이중 초기화를 방지한다.
+    Redis 연결이 runtime에 끊겨도 _RedisWithFallback이 자동으로 MemoryKV로 전환한다.
     """
     global _kv_singleton
     if _kv_singleton is not None:
@@ -148,7 +248,7 @@ async def get_kv() -> KVStore:
             )
             await asyncio.wait_for(client.ping(), timeout=3.0)
             logger.info("KV: using Redis (%s)", settings.redis_url)
-            _kv_singleton = client  # type: ignore[assignment]
+            _kv_singleton = _RedisWithFallback(client)
         except Exception as e:
             logger.warning("KV: Redis unavailable — in-memory KV (%s)", e)
             _kv_singleton = MemoryKV()
