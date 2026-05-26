@@ -2,11 +2,14 @@
 
 > AI 음성 상담, RAG, Post-Call 분석, 외부 업무도구 연동을 연결한 B2B 고객상담 SaaS 플랫폼
 
-<p align="center">
-  <a href="https://www.notion.so/3e8441f66d7883d4834081470e78583d?pvs=1">
-    <img src="https://img.shields.io/badge/Notion%20Project%20Page-View%20Details-7C3AED?style=for-the-badge&logo=notion&logoColor=white" alt="Notion Project Page" />
-  </a>
-</p>
+<table align="center">
+  <tr>
+    <td align="center" width="680">
+      <a href="https://www.notion.so/3e8441f66d7883d4834081470e78583d?pvs=1"><b>📘 Notion Project Page</b></a><br />
+      <sub>프로젝트 상세 문서 · 구현 과정 · 역할 정리 보기</sub>
+    </td>
+  </tr>
+</table>
 
 <p align="center">
   <img src="./assets/sisicallcall-dashboard.png" width="88%" alt="시시콜콜 관리자 대시보드" />
