@@ -12,6 +12,10 @@
 </table>
 
 <p align="center">
+  <video src="./assets/sisicallcall.mp4" width="88%" controls></video>
+</p>
+
+<p align="center">
   <img src="./assets/sisicallcall-dashboard.png" width="88%" alt="시시콜콜 관리자 대시보드" />
 </p>
 
