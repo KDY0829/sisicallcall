@@ -13,7 +13,7 @@
 
 ## 🎬 Demo Video
 
-https://github.com/KDY0829/sisicallcall/raw/main/assets/sisicallcall.mp4
+https://github.com/user-attachments/assets/33bf87c7-81d7-4e3f-8146-7285c9523980
 
 <p align="center">
   <img src="./assets/sisicallcall-rag-admin.gif" width="88%" alt="시시콜콜 RAG 지식 관리 데모" />
