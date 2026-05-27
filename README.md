@@ -12,7 +12,10 @@
 </table>
 
 <p align="center">
-  <video src="./assets/sisicallcall.mp4" width="88%" controls></video>
+  <a href="https://github.com/KDY0829/sisicallcall/raw/main/assets/sisicallcall.mp4">
+    <img src="./assets/sisicallcall-dashboard.png" width="88%" alt="시시콜콜 실행 영상" />
+  </a><br />
+  <sub>▶ 이미지를 클릭하면 실행 영상을 볼 수 있습니다.</sub>
 </p>
 
 <p align="center">
