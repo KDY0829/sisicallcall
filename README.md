@@ -19,6 +19,10 @@ https://github.com/user-attachments/assets/33bf87c7-81d7-4e3f-8146-7285c9523980
   <img src="./assets/sisicallcall-rag-admin.gif" width="88%" alt="시시콜콜 RAG 지식 관리 데모" />
 </p>
 
+<p align="center">
+  <img src="./assets/sisicallcall-dashboard.png" width="88%" alt="시시콜콜 관리자 대시보드" />
+</p>
+
 ## ✨ Highlights
 
 | 구분 | 내용 |
