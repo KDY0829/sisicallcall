@@ -11,12 +11,9 @@
   </tr>
 </table>
 
-<p align="center">
-  <a href="https://github.com/KDY0829/sisicallcall/raw/main/assets/sisicallcall.mp4">
-    <img src="./assets/sisicallcall-dashboard.png" width="88%" alt="시시콜콜 실행 영상" />
-  </a><br />
-  <sub>▶ 이미지를 클릭하면 실행 영상을 볼 수 있습니다.</sub>
-</p>
+## 🎬 Demo Video
+
+https://github.com/KDY0829/sisicallcall/raw/main/assets/sisicallcall.mp4
 
 <p align="center">
   <img src="./assets/sisicallcall-rag-admin.gif" width="88%" alt="시시콜콜 RAG 지식 관리 데모" />
